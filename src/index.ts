@@ -21,50 +21,6 @@ const JSON_HEADERS = {
   ...CORS_HEADERS,
 };
 
-let schemaChecked = false;
-
-async function ensureSchema(env: Env): Promise<void> {
-  if (schemaChecked) return;
-
-  try {
-    await env.DB.prepare('SELECT 1 FROM rating_summary LIMIT 1').first();
-    schemaChecked = true;
-    return;
-  } catch {}
-
-  try {
-    await env.DB.exec(`
-      CREATE TABLE IF NOT EXISTS ratings (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        anime_id TEXT NOT NULL,
-        user_id TEXT NOT NULL,
-        score INTEGER NOT NULL CHECK (score BETWEEN 1 AND 5),
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE (anime_id, user_id)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_ratings_anime ON ratings (anime_id);
-      CREATE INDEX IF NOT EXISTS idx_ratings_user ON ratings (user_id);
-
-      CREATE TABLE IF NOT EXISTS rating_summary (
-        anime_id TEXT PRIMARY KEY,
-        average REAL NOT NULL DEFAULT 0,
-        votes INTEGER NOT NULL DEFAULT 0,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_summary_avg ON rating_summary (average DESC);
-    `);
-
-    schemaChecked = true;
-    console.log('[schema] tables created');
-  } catch (err) {
-    console.error('[schema] failed:', err);
-    throw err;
-  }
-}
-
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data, null, 2), {
     status,
@@ -122,7 +78,7 @@ async function handleGet(
   }
 
   const { results } = await env.DB.prepare(
-    'SELECT anime_id, average, votes FROM rating_summary ORDER BY anime_id'
+    'SELECT anime_id, average, votes FROM rating_summary WHERE votes > 0 ORDER BY anime_id'
   ).all<RatingRow>();
 
   const data: Record<string, { average: number; votes: number }> = {};
@@ -274,8 +230,6 @@ export default {
       const animeId = getAnimeIdFromPath(path);
 
       try {
-        await ensureSchema(env);
-
         if (method === 'GET') return handleGet(request, env, animeId);
         if (method === 'POST') return handlePost(request, env, animeId);
         if (method === 'DELETE') return handleDelete(request, env, animeId);
