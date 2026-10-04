@@ -18,7 +18,6 @@ jobs:
           node-version: 22
 
       - name: Install dependencies
-        working-directory: worker
         run: npm ci
 
       - name: Deploy Worker
