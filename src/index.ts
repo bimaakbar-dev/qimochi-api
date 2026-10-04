@@ -6,9 +6,6 @@ interface Env {
   DB: D1Database;
 }
 
-// ============================================================
-// TYPES
-// ============================================================
 interface RatingRow {
   anime_id: string;
   average: number;
@@ -30,6 +27,56 @@ const JSON_HEADERS = {
   'Cache-Control': 'no-store',
   ...CORS_HEADERS,
 };
+
+// ============================================================
+// SCHEMA — auto-migrate (cache per isolate)
+// ============================================================
+let schemaChecked = false;
+
+async function ensureSchema(env: Env): Promise<void> {
+  if (schemaChecked) return;
+
+  try {
+    // Cek apakah tabel sudah ada (query ringan)
+    await env.DB.prepare('SELECT 1 FROM rating_summary LIMIT 1').first();
+    schemaChecked = true;
+    return;
+  } catch {
+    // Tabel belum ada → create
+  }
+
+  try {
+    await env.DB.exec(`
+      CREATE TABLE IF NOT EXISTS ratings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        anime_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        score INTEGER NOT NULL CHECK (score BETWEEN 1 AND 5),
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (anime_id, user_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_ratings_anime ON ratings (anime_id);
+      CREATE INDEX IF NOT EXISTS idx_ratings_user ON ratings (user_id);
+
+      CREATE TABLE IF NOT EXISTS rating_summary (
+        anime_id TEXT PRIMARY KEY,
+        average REAL NOT NULL DEFAULT 0,
+        votes INTEGER NOT NULL DEFAULT 0,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_summary_avg ON rating_summary (average DESC);
+    `);
+
+    schemaChecked = true;
+    console.log('[schema] tables created');
+  } catch (err) {
+    console.error('[schema] failed:', err);
+    throw err;
+  }
+}
 
 // ============================================================
 // HELPERS
@@ -57,25 +104,27 @@ async function hashIP(ip: string): Promise<string> {
 
 function getUserId(request: Request): string | null {
   const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown';
-  // Nanti bisa pakai cookie untuk identity yang lebih baik
   return ip;
 }
 
 function getAnimeIdFromPath(path: string): string | null {
-  // /api/v1/ratings/[animeId]  atau  /api/v1/ratings/[animeId]/
   const match = path.match(/^\/api\/v1\/ratings\/([^/]+)\/?$/);
   return match ? decodeURIComponent(match[1]) : null;
 }
 
 // ============================================================
-// ROUTE HANDLERS
+// HANDLERS
 // ============================================================
 
 /**
  * GET /api/v1/ratings              → list semua summary
  * GET /api/v1/ratings/[animeId]    → summary 1 anime
  */
-async function handleGet(request: Request, env: Env, animeId: string | null) {
+async function handleGet(
+  request: Request,
+  env: Env,
+  animeId: string | null
+): Promise<Response> {
   if (animeId) {
     const row = await env.DB.prepare(
       'SELECT anime_id, average, votes FROM rating_summary WHERE anime_id = ?'
@@ -96,7 +145,6 @@ async function handleGet(request: Request, env: Env, animeId: string | null) {
     });
   }
 
-  // List semua
   const { results } = await env.DB.prepare(
     'SELECT anime_id, average, votes FROM rating_summary ORDER BY anime_id'
   ).all<RatingRow>();
@@ -117,15 +165,14 @@ async function handlePost(
   request: Request,
   env: Env,
   animeId: string | null
-) {
+): Promise<Response> {
   if (!animeId) {
     return error('BAD_REQUEST', 'Missing anime id', 400);
   }
 
-  // Parse body
   let body: { score?: number };
   try {
-    body = await request.json();
+    body = (await request.json()) as { score?: number };
   } catch {
     return error('INVALID_JSON', 'Body bukan JSON valid', 400);
   }
@@ -135,7 +182,6 @@ async function handlePost(
     return error('INVALID_SCORE', 'Score harus integer 1-5', 400);
   }
 
-  // User identity
   const userId = getUserId(request);
   if (!userId) {
     return error('NO_USER_ID', 'Tidak bisa identifikasi user', 400);
@@ -171,7 +217,6 @@ async function handlePost(
     .bind(animeId, animeId)
     .run();
 
-  // Baca summary baru
   const summary = await env.DB.prepare(
     'SELECT average, votes FROM rating_summary WHERE anime_id = ?'
   )
@@ -197,7 +242,7 @@ async function handleDelete(
   request: Request,
   env: Env,
   animeId: string | null
-) {
+): Promise<Response> {
   if (!animeId) {
     return error('BAD_REQUEST', 'Missing anime id', 400);
   }
@@ -269,13 +314,18 @@ export default {
       const animeId = getAnimeIdFromPath(path);
 
       try {
+        // Auto-migrate sekali per isolate
+        await ensureSchema(env);
+
         if (method === 'GET') return handleGet(request, env, animeId);
         if (method === 'POST') return handlePost(request, env, animeId);
         if (method === 'DELETE') return handleDelete(request, env, animeId);
+
         return error('METHOD_NOT_ALLOWED', `${method} tidak didukung`, 405);
       } catch (err) {
         console.error('[worker error]', err);
-        return error('INTERNAL_ERROR', 'Terjadi kesalahan di server', 500);
+        const msg = err instanceof Error ? err.message : 'Unknown error';
+        return error('INTERNAL_ERROR', `Server error: ${msg}`, 500);
       }
     }
 
