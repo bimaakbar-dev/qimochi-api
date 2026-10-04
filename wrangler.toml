@@ -4,6 +4,6 @@ compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
 
 [[d1_databases]]
-binding = "DB",
-database_name: "qimochi-db",
-database_id: "9d6d7f39-3af8-4167-9db7-b9e0a64fdef9"
+binding = "DB"
+database_name = "qimochi-db"
+database_id = "9d6d7f39-3af8-4167-9db7-b9e0a64fdef9"
