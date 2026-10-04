@@ -1,7 +1,3 @@
-// src/index.ts
-// Qimochi API — Rating Endpoint
-// Cloudflare Worker + D1
-
 interface Env {
   DB: D1Database;
 }
@@ -12,9 +8,6 @@ interface RatingRow {
   votes: number;
 }
 
-// ============================================================
-// CONSTANTS
-// ============================================================
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
@@ -28,22 +21,16 @@ const JSON_HEADERS = {
   ...CORS_HEADERS,
 };
 
-// ============================================================
-// SCHEMA — auto-migrate (cache per isolate)
-// ============================================================
 let schemaChecked = false;
 
 async function ensureSchema(env: Env): Promise<void> {
   if (schemaChecked) return;
 
   try {
-    // Cek apakah tabel sudah ada (query ringan)
     await env.DB.prepare('SELECT 1 FROM rating_summary LIMIT 1').first();
     schemaChecked = true;
     return;
-  } catch {
-    // Tabel belum ada → create
-  }
+  } catch {}
 
   try {
     await env.DB.exec(`
@@ -78,9 +65,6 @@ async function ensureSchema(env: Env): Promise<void> {
   }
 }
 
-// ============================================================
-// HELPERS
-// ============================================================
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data, null, 2), {
     status,
@@ -112,14 +96,6 @@ function getAnimeIdFromPath(path: string): string | null {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
-// ============================================================
-// HANDLERS
-// ============================================================
-
-/**
- * GET /api/v1/ratings              → list semua summary
- * GET /api/v1/ratings/[animeId]    → summary 1 anime
- */
 async function handleGet(
   request: Request,
   env: Env,
@@ -157,10 +133,6 @@ async function handleGet(
   return json({ data, total: Object.keys(data).length });
 }
 
-/**
- * POST /api/v1/ratings/[animeId]
- * Body: { score: 1-5 }
- */
 async function handlePost(
   request: Request,
   env: Env,
@@ -188,7 +160,6 @@ async function handlePost(
   }
   const userHash = await hashIP(userId);
 
-  // UPSERT rating
   await env.DB.prepare(
     `INSERT INTO ratings (anime_id, user_id, score)
      VALUES (?, ?, ?)
@@ -198,7 +169,6 @@ async function handlePost(
     .bind(animeId, userHash, score)
     .run();
 
-  // Update summary
   await env.DB.prepare(
     `INSERT INTO rating_summary (anime_id, average, votes, updated_at)
      SELECT 
@@ -235,9 +205,6 @@ async function handlePost(
   });
 }
 
-/**
- * DELETE /api/v1/ratings/[animeId] → hapus vote user ini
- */
 async function handleDelete(
   request: Request,
   env: Env,
@@ -263,7 +230,6 @@ async function handleDelete(
     return error('NOT_FOUND', 'Rating tidak ditemukan', 404);
   }
 
-  // Update summary
   await env.DB.prepare(
     `INSERT INTO rating_summary (anime_id, average, votes, updated_at)
      SELECT 
@@ -285,21 +251,16 @@ async function handleDelete(
   return json({ ok: true, message: 'Rating dihapus' });
 }
 
-// ============================================================
-// MAIN HANDLER
-// ============================================================
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
     const method = request.method;
 
-    // CORS preflight
     if (method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: CORS_HEADERS });
     }
 
-    // Health check
     if (path === '/' || path === '/health') {
       return json({
         name: 'Qimochi API',
@@ -309,12 +270,10 @@ export default {
       });
     }
 
-    // Rating routes
     if (path === '/api/v1/ratings' || path.startsWith('/api/v1/ratings/')) {
       const animeId = getAnimeIdFromPath(path);
 
       try {
-        // Auto-migrate sekali per isolate
         await ensureSchema(env);
 
         if (method === 'GET') return handleGet(request, env, animeId);
