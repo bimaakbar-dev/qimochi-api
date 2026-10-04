@@ -27,13 +27,3 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          secrets: |
-            TELEGRAM_BOT_TOKEN
-            GH_WEBHOOK_SECRET
-            ADMIN_CHAT_ID
-            DISCORD_WEBHOOK_GISCUS
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          GH_WEBHOOK_SECRET: ${{ secrets.GH_WEBHOOK_SECRET }}
-          ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
-          DISCORD_WEBHOOK_GISCUS: ${{ secrets.DISCORD_WEBHOOK_GISCUS }}
