@@ -1,4 +1,9 @@
-name = "c0desk1-bot"
+name = "c0desk1-api"
 main = "src/index.ts"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name: "qimochi-db",
+database_id: "9d6d7f39-3af8-4167-9db7-b9e0a64fdef9"
