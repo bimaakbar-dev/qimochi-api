@@ -3,10 +3,14 @@ import { createRouter } from './lib/router';
 import { json, error, corsHeaders } from './lib/response';
 import { mountRatings } from './routes/ratings';
 import { mountAuth } from './routes/auth';
+import { mountComments } from './routes/comments';
+import { mountBot } from './routes/bot';
 
 const router = createRouter();
 mountRatings(router);
 mountAuth(router);
+mountComments(router);
+mountBot(router);
 
 export default {
   async fetch(
