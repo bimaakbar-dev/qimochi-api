@@ -9,7 +9,7 @@ routes = [
 
 [vars]
 ALLOWED_ORIGIN = "https://qimochi.web.id"
-GOOGLE_CLIENT_ID = ""
+GOOGLE_CLIENT_ID = "98346168648-ferhj5ams83nirq87qtjoatl71g8qg5s.apps.googleusercontent.com"
 
 [[d1_databases]]
 binding = "DB"
