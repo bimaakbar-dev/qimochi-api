@@ -3,10 +3,10 @@ import { json, error } from '../lib/response';
 import { getSession } from '../lib/session';
 import { verifyTurnstile } from '../lib/turnstile';
 import { checkRateLimit, getClientIp, hashKey } from '../lib/ratelimit';
+import { notifyTelegram } from './telegram';
 
 const MAX_BODY_LEN = 2000;
 const MIN_BODY_LEN = 2;
-const MAX_PARENT_DEPTH = 1;
 
 interface CommentRow {
   id: string;
@@ -136,7 +136,13 @@ async function createComment(ctx: Ctx): Promise<Response> {
   const minuteLimit = await checkRateLimit(ctx.env.DB, `${userKey}:m`, 5, 60);
   if (!minuteLimit.ok) {
     return json(
-      { error: { code: 'RATE_LIMITED', message: 'Terlalu cepat, tunggu sebentar', status: 429 } },
+      {
+        error: {
+          code: 'RATE_LIMITED',
+          message: 'Terlalu cepat, tunggu sebentar',
+          status: 429,
+        },
+      },
       ctx.env,
       429,
       { 'Retry-After': String(minuteLimit.retryAfter) }
@@ -145,7 +151,13 @@ async function createComment(ctx: Ctx): Promise<Response> {
   const hourLimit = await checkRateLimit(ctx.env.DB, `${userKey}:h`, 20, 3600);
   if (!hourLimit.ok) {
     return json(
-      { error: { code: 'RATE_LIMITED', message: 'Batas per jam tercapai', status: 429 } },
+      {
+        error: {
+          code: 'RATE_LIMITED',
+          message: 'Batas per jam tercapai',
+          status: 429,
+        },
+      },
       ctx.env,
       429,
       { 'Retry-After': String(hourLimit.retryAfter) }
@@ -178,6 +190,16 @@ async function createComment(ctx: Ctx): Promise<Response> {
   )
     .bind(id, slug, session.sub, parentId, text, now)
     .run();
+
+  ctx.exec.waitUntil(
+    notifyTelegram(ctx.env, {
+      id,
+      slug,
+      body: text,
+      userName: session.name,
+      userEmail: session.email,
+    }).catch((err) => console.error('[telegram] notify failed', err))
+  );
 
   const webhookUrl = ctx.env.BOT_WEBHOOK;
   if (webhookUrl) {
