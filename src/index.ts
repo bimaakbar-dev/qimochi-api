@@ -2,9 +2,11 @@ import type { Env } from './env';
 import { createRouter } from './lib/router';
 import { json, error, corsHeaders } from './lib/response';
 import { mountRatings } from './routes/ratings';
+import { mountAuth } from './routes/auth';
 
 const router = createRouter();
 mountRatings(router);
+mountAuth(router);
 
 export default {
   async fetch(
@@ -19,10 +21,7 @@ export default {
     }
 
     if (url.pathname === '/' || url.pathname === '/health') {
-      return json(
-        { name: 'Qimochi API', version: 'v1', status: 'ok' },
-        env
-      );
+      return json({ name: 'Qimochi API', version: 'v1', status: 'ok' }, env);
     }
 
     const matched = router.match(request.method, url.pathname);
