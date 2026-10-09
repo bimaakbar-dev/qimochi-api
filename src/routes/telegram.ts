@@ -6,7 +6,6 @@ import {
   answerCallbackQuery,
   buildCommentMessage,
   buildModeratedMessage,
-  escapeHtml,
 } from '../lib/telegram';
 
 export interface PendingComment {
@@ -15,6 +14,10 @@ export interface PendingComment {
   body: string;
   userName: string;
   userEmail: string;
+}
+
+function sanitizeSecret(input: string): string {
+  return input.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 256);
 }
 
 async function purgeCacheForSlug(slug: string): Promise<void> {
@@ -69,7 +72,7 @@ async function handleWebhook(ctx: Ctx): Promise<Response> {
   const secretHeader = ctx.request.headers.get(
     'X-Telegram-Bot-Api-Secret-Token'
   );
-  const expected = ctx.env.TELEGRAM_WEBHOOK_SECRET;
+  const expected = sanitizeSecret(ctx.env.TELEGRAM_WEBHOOK_SECRET ?? '');
   if (!expected || secretHeader !== expected) {
     return error('UNAUTHORIZED', 'Secret tidak valid', ctx.env, 401);
   }
@@ -181,7 +184,9 @@ async function handleWebhook(ctx: Ctx): Promise<Response> {
 
 async function setupWebhook(ctx: Ctx): Promise<Response> {
   const token = ctx.env.TELEGRAM_BOT_TOKEN;
-  const secret = ctx.env.TELEGRAM_WEBHOOK_SECRET;
+  const rawSecret = ctx.env.TELEGRAM_WEBHOOK_SECRET ?? '';
+  const secret = sanitizeSecret(rawSecret);
+
   if (!token || !secret) {
     return error(
       'SERVER_MISCONFIGURED',
@@ -222,6 +227,8 @@ async function setupWebhook(ctx: Ctx): Promise<Response> {
       ok: data.ok,
       description: data.description ?? null,
       webhookUrl,
+      sanitizedSecretLength: secret.length,
+      originalSecretLength: rawSecret.length,
       result: data.result ?? null,
     },
     ctx.env
