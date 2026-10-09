@@ -1,247 +1,47 @@
-interface Env {
-  DB: D1Database;
-}
+import type { Env } from './env';
+import { createRouter } from './lib/router';
+import { json, error, corsHeaders } from './lib/response';
+import { mountRatings } from './routes/ratings';
 
-interface RatingRow {
-  anime_id: string;
-  average: number;
-  votes: number;
-}
-
-const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
-  'Access-Control-Max-Age': '86400',
-};
-
-const JSON_HEADERS = {
-  'Content-Type': 'application/json; charset=utf-8',
-  'Cache-Control': 'no-store',
-  ...CORS_HEADERS,
-};
-
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data, null, 2), {
-    status,
-    headers: JSON_HEADERS,
-  });
-}
-
-function error(code: string, message: string, status = 400): Response {
-  return json({ error: { code, message, status } }, status);
-}
-
-async function hashIP(ip: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(ip + 'qimochi-salt-v1');
-  const hash = await crypto.subtle.digest('SHA-256', data);
-  return Array.from(new Uint8Array(hash))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('')
-    .slice(0, 16);
-}
-
-function getUserId(request: Request): string | null {
-  const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown';
-  return ip;
-}
-
-function getAnimeIdFromPath(path: string): string | null {
-  const match = path.match(/^\/api\/v1\/ratings\/([^/]+)\/?$/);
-  return match ? decodeURIComponent(match[1]) : null;
-}
-
-async function handleGet(
-  request: Request,
-  env: Env,
-  animeId: string | null
-): Promise<Response> {
-  if (animeId) {
-    const row = await env.DB.prepare(
-      'SELECT anime_id, average, votes FROM rating_summary WHERE anime_id = ?'
-    )
-      .bind(animeId)
-      .first<RatingRow>();
-
-    if (!row) {
-      return json({ data: { animeId, average: 0, votes: 0 } });
-    }
-
-    return json({
-      data: {
-        animeId: row.anime_id,
-        average: row.average,
-        votes: row.votes,
-      },
-    });
-  }
-
-  const { results } = await env.DB.prepare(
-    'SELECT anime_id, average, votes FROM rating_summary WHERE votes > 0 ORDER BY anime_id'
-  ).all<RatingRow>();
-
-  const data: Record<string, { average: number; votes: number }> = {};
-  for (const row of results ?? []) {
-    data[row.anime_id] = { average: row.average, votes: row.votes };
-  }
-
-  return json({ data, total: Object.keys(data).length });
-}
-
-async function handlePost(
-  request: Request,
-  env: Env,
-  animeId: string | null
-): Promise<Response> {
-  if (!animeId) {
-    return error('BAD_REQUEST', 'Missing anime id', 400);
-  }
-
-  let body: { score?: number };
-  try {
-    body = (await request.json()) as { score?: number };
-  } catch {
-    return error('INVALID_JSON', 'Body bukan JSON valid', 400);
-  }
-
-  const score = Number(body.score);
-  if (!Number.isInteger(score) || score < 1 || score > 5) {
-    return error('INVALID_SCORE', 'Score harus integer 1-5', 400);
-  }
-
-  const userId = getUserId(request);
-  if (!userId) {
-    return error('NO_USER_ID', 'Tidak bisa identifikasi user', 400);
-  }
-  const userHash = await hashIP(userId);
-
-  await env.DB.prepare(
-    `INSERT INTO ratings (anime_id, user_id, score)
-     VALUES (?, ?, ?)
-     ON CONFLICT (anime_id, user_id)
-     DO UPDATE SET score = excluded.score, updated_at = CURRENT_TIMESTAMP`
-  )
-    .bind(animeId, userHash, score)
-    .run();
-
-  await env.DB.prepare(
-    `INSERT INTO rating_summary (anime_id, average, votes, updated_at)
-     SELECT 
-       ?,
-       COALESCE(AVG(score) * 2, 0),
-       COUNT(*),
-       CURRENT_TIMESTAMP
-     FROM ratings
-     WHERE anime_id = ?
-     ON CONFLICT (anime_id)
-     DO UPDATE SET
-       average = excluded.average,
-       votes = excluded.votes,
-       updated_at = CURRENT_TIMESTAMP`
-  )
-    .bind(animeId, animeId)
-    .run();
-
-  const summary = await env.DB.prepare(
-    'SELECT average, votes FROM rating_summary WHERE anime_id = ?'
-  )
-    .bind(animeId)
-    .first<{ average: number; votes: number }>();
-
-  return json({
-    ok: true,
-    message: 'Rating tersimpan',
-    data: {
-      animeId,
-      yourScore: score,
-      average: summary?.average ?? 0,
-      votes: summary?.votes ?? 0,
-    },
-  });
-}
-
-async function handleDelete(
-  request: Request,
-  env: Env,
-  animeId: string | null
-): Promise<Response> {
-  if (!animeId) {
-    return error('BAD_REQUEST', 'Missing anime id', 400);
-  }
-
-  const userId = getUserId(request);
-  if (!userId) {
-    return error('NO_USER_ID', 'Tidak bisa identifikasi user', 400);
-  }
-  const userHash = await hashIP(userId);
-
-  const result = await env.DB.prepare(
-    'DELETE FROM ratings WHERE anime_id = ? AND user_id = ?'
-  )
-    .bind(animeId, userHash)
-    .run();
-
-  if ((result.meta?.changes ?? 0) === 0) {
-    return error('NOT_FOUND', 'Rating tidak ditemukan', 404);
-  }
-
-  await env.DB.prepare(
-    `INSERT INTO rating_summary (anime_id, average, votes, updated_at)
-     SELECT 
-       ?,
-       COALESCE(AVG(score) * 2, 0),
-       COUNT(*),
-       CURRENT_TIMESTAMP
-     FROM ratings
-     WHERE anime_id = ?
-     ON CONFLICT (anime_id)
-     DO UPDATE SET
-       average = excluded.average,
-       votes = excluded.votes,
-       updated_at = CURRENT_TIMESTAMP`
-  )
-    .bind(animeId, animeId)
-    .run();
-
-  return json({ ok: true, message: 'Rating dihapus' });
-}
+const router = createRouter();
+mountRatings(router);
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(
+    request: Request,
+    env: Env,
+    exec: ExecutionContext
+  ): Promise<Response> {
     const url = new URL(request.url);
-    const path = url.pathname;
-    const method = request.method;
 
-    if (method === 'OPTIONS') {
-      return new Response(null, { status: 204, headers: CORS_HEADERS });
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: corsHeaders(env) });
     }
 
-    if (path === '/' || path === '/health') {
-      return json({
-        name: 'Qimochi API',
-        version: 'v1',
-        status: 'ok',
-        timestamp: new Date().toISOString(),
+    if (url.pathname === '/' || url.pathname === '/health') {
+      return json(
+        { name: 'Qimochi API', version: 'v1', status: 'ok' },
+        env
+      );
+    }
+
+    const matched = router.match(request.method, url.pathname);
+    if (!matched) {
+      return error('NOT_FOUND', `Path ${url.pathname} tidak ditemukan`, env, 404);
+    }
+
+    try {
+      return await matched.handler({
+        request,
+        env,
+        exec,
+        url,
+        params: matched.params,
       });
+    } catch (err) {
+      console.error('[worker error]', err);
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      return error('INTERNAL_ERROR', `Server error: ${msg}`, env, 500);
     }
-
-    if (path === '/api/v1/ratings' || path.startsWith('/api/v1/ratings/')) {
-      const animeId = getAnimeIdFromPath(path);
-
-      try {
-        if (method === 'GET') return handleGet(request, env, animeId);
-        if (method === 'POST') return handlePost(request, env, animeId);
-        if (method === 'DELETE') return handleDelete(request, env, animeId);
-
-        return error('METHOD_NOT_ALLOWED', `${method} tidak didukung`, 405);
-      } catch (err) {
-        console.error('[worker error]', err);
-        const msg = err instanceof Error ? err.message : 'Unknown error';
-        return error('INTERNAL_ERROR', `Server error: ${msg}`, 500);
-      }
-    }
-
-    return error('NOT_FOUND', `Path ${path} tidak ditemukan`, 404);
   },
 } satisfies ExportedHandler<Env>;
