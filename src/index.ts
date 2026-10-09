@@ -5,12 +5,14 @@ import { mountRatings } from './routes/ratings';
 import { mountAuth } from './routes/auth';
 import { mountComments } from './routes/comments';
 import { mountBot } from './routes/bot';
+import { mountTelegram } from './routes/telegram';
 
 const router = createRouter();
 mountRatings(router);
 mountAuth(router);
 mountComments(router);
 mountBot(router);
+mountTelegram(router);
 
 export default {
   async fetch(
