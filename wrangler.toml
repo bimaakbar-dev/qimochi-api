@@ -3,6 +3,14 @@ main = "src/index.ts"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
 
+routes = [
+  { pattern = "api.qimochi.web.id/*", zone_name = "qimochi.web.id" }
+]
+
+[vars]
+ALLOWED_ORIGIN = "https://qimochi.web.id"
+GOOGLE_CLIENT_ID = ""
+
 [[d1_databases]]
 binding = "DB"
 database_name = "qimochi-db"
