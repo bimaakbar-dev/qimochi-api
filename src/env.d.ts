@@ -10,4 +10,6 @@ export interface Env {
   TELEGRAM_CHAT_ID: string;
   TELEGRAM_WEBHOOK_SECRET: string;
   ADMIN_EMAILS: string;
+  BAD_WORDS?: string;
+  AUTO_MODERATE?: string;
 }
