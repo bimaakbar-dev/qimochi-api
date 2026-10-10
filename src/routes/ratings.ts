@@ -21,6 +21,21 @@ async function getUserRating(
   return row?.score ?? null;
 }
 
+async function getDistribution(
+  ctx: Ctx,
+  animeId: string
+): Promise<Record<number, number>> {
+  const { results } = await ctx.env.DB.prepare(
+    `SELECT score, COUNT(*) as c FROM ratings WHERE anime_id = ? GROUP BY score`
+  )
+    .bind(animeId)
+    .all<{ score: number; c: number }>();
+
+  const dist: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+  for (const r of results ?? []) dist[r.score] = r.c;
+  return dist;
+}
+
 async function listAll(ctx: Ctx): Promise<Response> {
   const { results } = await ctx.env.DB.prepare(
     'SELECT anime_id, average, votes FROM rating_summary WHERE votes > 0 ORDER BY anime_id'
@@ -31,7 +46,9 @@ async function listAll(ctx: Ctx): Promise<Response> {
     data[row.anime_id] = { average: row.average, votes: row.votes };
   }
 
-  return json({ data, total: Object.keys(data).length }, ctx.env);
+  return json({ data, total: Object.keys(data).length }, ctx.env, 200, {
+    'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=300',
+  });
 }
 
 async function getOne(ctx: Ctx): Promise<Response> {
@@ -49,6 +66,8 @@ async function getOne(ctx: Ctx): Promise<Response> {
     userScore = await getUserRating(ctx, animeId, session.sub);
   }
 
+  const distribution = await getDistribution(ctx, animeId);
+
   return json(
     {
       data: {
@@ -57,6 +76,7 @@ async function getOne(ctx: Ctx): Promise<Response> {
         votes: row?.votes ?? 0,
         userScore,
         canRate: session !== null,
+        distribution,
       },
     },
     ctx.env
@@ -115,6 +135,8 @@ async function postOne(ctx: Ctx): Promise<Response> {
     .bind(animeId)
     .first<{ average: number; votes: number }>();
 
+  const distribution = await getDistribution(ctx, animeId);
+
   return json(
     {
       ok: true,
@@ -123,6 +145,7 @@ async function postOne(ctx: Ctx): Promise<Response> {
         userScore: score,
         average: summary?.average ?? 0,
         votes: summary?.votes ?? 0,
+        distribution,
       },
     },
     ctx.env
@@ -131,9 +154,7 @@ async function postOne(ctx: Ctx): Promise<Response> {
 
 async function deleteOne(ctx: Ctx): Promise<Response> {
   const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
-  if (!session) {
-    return error('UNAUTHORIZED', 'Login dulu', ctx.env, 401);
-  }
+  if (!session) return error('UNAUTHORIZED', 'Login dulu', ctx.env, 401);
 
   const animeId = ctx.params.id!;
 
@@ -155,6 +176,8 @@ async function deleteOne(ctx: Ctx): Promise<Response> {
     .bind(animeId)
     .first<{ average: number; votes: number }>();
 
+  const distribution = await getDistribution(ctx, animeId);
+
   return json(
     {
       ok: true,
@@ -163,6 +186,7 @@ async function deleteOne(ctx: Ctx): Promise<Response> {
         userScore: null,
         average: summary?.average ?? 0,
         votes: summary?.votes ?? 0,
+        distribution,
       },
     },
     ctx.env
