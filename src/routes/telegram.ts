@@ -2,10 +2,9 @@ import type { Ctx, Router } from '../lib/router';
 import { json, error } from '../lib/response';
 import {
   sendMessage,
-  editMessageText,
+  deleteMessage,
   answerCallbackQuery,
   buildCommentMessage,
-  buildModeratedMessage,
   escapeHtml,
 } from '../lib/telegram';
 
@@ -452,7 +451,15 @@ async function handleMessage(
         });
         return;
       }
-      await moderateById(ctx, token, chatId, args[0], 'approve', moderator, args.slice(1).join(' ') || null);
+      await moderateById(
+        ctx,
+        token,
+        chatId,
+        args[0],
+        'approve',
+        moderator,
+        args.slice(1).join(' ') || null
+      );
       return;
     case '/reject':
       if (!args[0]) {
@@ -462,7 +469,15 @@ async function handleMessage(
         });
         return;
       }
-      await moderateById(ctx, token, chatId, args[0], 'reject', moderator, args.slice(1).join(' ') || null);
+      await moderateById(
+        ctx,
+        token,
+        chatId,
+        args[0],
+        'reject',
+        moderator,
+        args.slice(1).join(' ') || null
+      );
       return;
     default:
       await sendMessage(token, {
@@ -545,19 +560,15 @@ async function handleCallback(
     await answerCallbackQuery(token, cq.id, 'Ditolak ❌');
   }
 
-  const originalText = cq.message.text ?? '';
-  const newText = buildModeratedMessage(
-    originalText,
-    action === 'approve' ? 'approved' : 'rejected',
-    moderator
-  );
-
-  await editMessageText(
-    token,
-    String(cq.message.chat.id),
-    cq.message.message_id,
-    newText
-  );
+  try {
+    await deleteMessage(
+      token,
+      String(cq.message.chat.id),
+      cq.message.message_id
+    );
+  } catch (err) {
+    console.error('[telegram] delete message failed', err);
+  }
 }
 
 async function handleWebhook(ctx: Ctx): Promise<Response> {
