@@ -237,6 +237,37 @@ async function createComment(ctx: Ctx): Promise<Response> {
     );
   }
 
+  const moderation = moderate(text, ctx.env);
+
+  if (moderation.decision === 'rejected') {
+    ctx.exec.waitUntil(
+      notifyAutoRejected(ctx.env, {
+        slug,
+        body: text,
+        userName: session.name,
+        userEmail: session.email,
+        reason: moderation.reason,
+        matched: moderation.matched,
+      }).catch((err) =>
+        console.error('[telegram] auto-rejected notify failed', err)
+      )
+    );
+
+    return json(
+      {
+        ok: false,
+        error: {
+          code: 'COMMENT_REJECTED',
+          message:
+            'Komentar kamu mengandung kata yang tidak diizinkan. Mohon periksa kembali sebelum mengirim.',
+          status: 400,
+        },
+      },
+      ctx.env,
+      400
+    );
+  }
+
   let parentId: string | null = null;
   if (body.parentId && typeof body.parentId === 'string') {
     const parent = await ctx.env.DB.prepare(
@@ -254,20 +285,12 @@ async function createComment(ctx: Ctx): Promise<Response> {
     parentId = parent.id;
   }
 
-  const moderation = moderate(text, ctx.env);
   const status = moderation.decision;
   const isApproved = status === 'approved';
-  const isRejected = status === 'rejected';
 
   const id = newId();
   const now = Math.floor(Date.now() / 1000);
   const admins = adminSet(ctx.env);
-
-  const moderatedBy = isApproved
-    ? 'bot:auto'
-    : isRejected
-    ? 'bot:badword'
-    : null;
 
   await ctx.env.DB.prepare(
     `INSERT INTO comments
@@ -284,7 +307,7 @@ async function createComment(ctx: Ctx): Promise<Response> {
       status,
       now,
       isApproved ? now : null,
-      moderatedBy,
+      isApproved ? 'bot:auto' : null,
       moderation.reason || null
     )
     .run();
@@ -298,19 +321,6 @@ async function createComment(ctx: Ctx): Promise<Response> {
         userName: session.name,
         userEmail: session.email,
       }).catch((err) => console.error('[telegram] notify failed', err))
-    );
-  } else if (isRejected) {
-    ctx.exec.waitUntil(
-      notifyAutoRejected(ctx.env, {
-        id,
-        slug,
-        body: text,
-        userName: session.name,
-        reason: moderation.reason,
-        matched: moderation.matched,
-      }).catch((err) =>
-        console.error('[telegram] auto-rejected notify failed', err)
-      )
     );
   }
 
@@ -331,7 +341,7 @@ async function createComment(ctx: Ctx): Promise<Response> {
         isLiked: false,
         isOwn: true,
         isAdmin: admins.has(session.email.toLowerCase()),
-        canEdit: status !== 'rejected',
+        canEdit: true,
         user: {
           sub: session.sub,
           name: session.name,
@@ -443,15 +453,25 @@ async function editComment(ctx: Ctx): Promise<Response> {
   }
 
   const moderation = moderate(text, ctx.env);
+
+  if (moderation.decision === 'rejected') {
+    return json(
+      {
+        ok: false,
+        error: {
+          code: 'COMMENT_REJECTED',
+          message:
+            'Hasil edit mengandung kata yang tidak diizinkan. Mohon periksa kembali.',
+          status: 400,
+        },
+      },
+      ctx.env,
+      400
+    );
+  }
+
   const status = moderation.decision;
   const isApproved = status === 'approved';
-  const isRejected = status === 'rejected';
-
-  const moderatedBy = isApproved
-    ? 'bot:auto'
-    : isRejected
-    ? 'bot:badword'
-    : null;
 
   await ctx.env.DB.prepare(
     `UPDATE comments
@@ -468,7 +488,7 @@ async function editComment(ctx: Ctx): Promise<Response> {
       now,
       status,
       isApproved ? now : null,
-      moderatedBy,
+      isApproved ? 'bot:auto' : null,
       moderation.reason || null,
       id
     )
