@@ -1,6 +1,6 @@
-import type { Env } from '../env';
 import type { Ctx, Router } from '../lib/router';
 import { json, error } from '../lib/response';
+import { getSession } from '../lib/session';
 
 interface RatingRow {
   anime_id: string;
@@ -8,19 +8,17 @@ interface RatingRow {
   votes: number;
 }
 
-async function hashIP(ip: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(ip + 'qimochi-salt-v1');
-  const hash = await crypto.subtle.digest('SHA-256', data);
-  return Array.from(new Uint8Array(hash))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('')
-    .slice(0, 16);
-}
-
-function getUserId(request: Request): string | null {
-  const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown';
-  return ip;
+async function getUserRating(
+  ctx: Ctx,
+  animeId: string,
+  userId: string
+): Promise<number | null> {
+  const row = await ctx.env.DB.prepare(
+    `SELECT score FROM ratings WHERE anime_id = ? AND user_id = ?`
+  )
+    .bind(animeId, userId)
+    .first<{ score: number }>();
+  return row?.score ?? null;
 }
 
 async function listAll(ctx: Ctx): Promise<Response> {
@@ -38,21 +36,54 @@ async function listAll(ctx: Ctx): Promise<Response> {
 
 async function getOne(ctx: Ctx): Promise<Response> {
   const animeId = ctx.params.id!;
+  const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
+
   const row = await ctx.env.DB.prepare(
     'SELECT anime_id, average, votes FROM rating_summary WHERE anime_id = ?'
   )
     .bind(animeId)
     .first<RatingRow>();
 
-  if (!row) return json({ data: { animeId, average: 0, votes: 0 } }, ctx.env);
+  let userScore: number | null = null;
+  if (session) {
+    userScore = await getUserRating(ctx, animeId, session.sub);
+  }
 
   return json(
-    { data: { animeId: row.anime_id, average: row.average, votes: row.votes } },
+    {
+      data: {
+        animeId,
+        average: row?.average ?? 0,
+        votes: row?.votes ?? 0,
+        userScore,
+        canRate: session !== null,
+      },
+    },
     ctx.env
   );
 }
 
+async function recomputeSummary(ctx: Ctx, animeId: string): Promise<void> {
+  await ctx.env.DB.prepare(
+    `INSERT INTO rating_summary (anime_id, average, votes, updated_at)
+     SELECT ?, COALESCE(AVG(score) * 2, 0), COUNT(*), CURRENT_TIMESTAMP
+     FROM ratings WHERE anime_id = ?
+     ON CONFLICT (anime_id)
+     DO UPDATE SET
+       average = excluded.average,
+       votes = excluded.votes,
+       updated_at = CURRENT_TIMESTAMP`
+  )
+    .bind(animeId, animeId)
+    .run();
+}
+
 async function postOne(ctx: Ctx): Promise<Response> {
+  const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
+  if (!session) {
+    return error('UNAUTHORIZED', 'Login dulu untuk memberi rating', ctx.env, 401);
+  }
+
   const animeId = ctx.params.id!;
 
   let body: { score?: number };
@@ -67,31 +98,16 @@ async function postOne(ctx: Ctx): Promise<Response> {
     return error('INVALID_SCORE', 'Score harus integer 1-5', ctx.env, 400);
   }
 
-  const userId = getUserId(ctx.request);
-  if (!userId) return error('NO_USER_ID', 'Tidak bisa identifikasi user', ctx.env, 400);
-  const userHash = await hashIP(userId);
-
   await ctx.env.DB.prepare(
     `INSERT INTO ratings (anime_id, user_id, score)
      VALUES (?, ?, ?)
      ON CONFLICT (anime_id, user_id)
      DO UPDATE SET score = excluded.score, updated_at = CURRENT_TIMESTAMP`
   )
-    .bind(animeId, userHash, score)
+    .bind(animeId, session.sub, score)
     .run();
 
-  await ctx.env.DB.prepare(
-    `INSERT INTO rating_summary (anime_id, average, votes, updated_at)
-     SELECT ?, COALESCE(AVG(score) * 2, 0), COUNT(*), CURRENT_TIMESTAMP
-     FROM ratings WHERE anime_id = ?
-     ON CONFLICT (anime_id)
-     DO UPDATE SET
-       average = excluded.average,
-       votes = excluded.votes,
-       updated_at = CURRENT_TIMESTAMP`
-  )
-    .bind(animeId, animeId)
-    .run();
+  await recomputeSummary(ctx, animeId);
 
   const summary = await ctx.env.DB.prepare(
     'SELECT average, votes FROM rating_summary WHERE anime_id = ?'
@@ -102,10 +118,9 @@ async function postOne(ctx: Ctx): Promise<Response> {
   return json(
     {
       ok: true,
-      message: 'Rating tersimpan',
       data: {
         animeId,
-        yourScore: score,
+        userScore: score,
         average: summary?.average ?? 0,
         votes: summary?.votes ?? 0,
       },
@@ -115,36 +130,43 @@ async function postOne(ctx: Ctx): Promise<Response> {
 }
 
 async function deleteOne(ctx: Ctx): Promise<Response> {
-  const animeId = ctx.params.id!;
+  const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
+  if (!session) {
+    return error('UNAUTHORIZED', 'Login dulu', ctx.env, 401);
+  }
 
-  const userId = getUserId(ctx.request);
-  if (!userId) return error('NO_USER_ID', 'Tidak bisa identifikasi user', ctx.env, 400);
-  const userHash = await hashIP(userId);
+  const animeId = ctx.params.id!;
 
   const result = await ctx.env.DB.prepare(
     'DELETE FROM ratings WHERE anime_id = ? AND user_id = ?'
   )
-    .bind(animeId, userHash)
+    .bind(animeId, session.sub)
     .run();
 
   if ((result.meta?.changes ?? 0) === 0) {
     return error('NOT_FOUND', 'Rating tidak ditemukan', ctx.env, 404);
   }
 
-  await ctx.env.DB.prepare(
-    `INSERT INTO rating_summary (anime_id, average, votes, updated_at)
-     SELECT ?, COALESCE(AVG(score) * 2, 0), COUNT(*), CURRENT_TIMESTAMP
-     FROM ratings WHERE anime_id = ?
-     ON CONFLICT (anime_id)
-     DO UPDATE SET
-       average = excluded.average,
-       votes = excluded.votes,
-       updated_at = CURRENT_TIMESTAMP`
-  )
-    .bind(animeId, animeId)
-    .run();
+  await recomputeSummary(ctx, animeId);
 
-  return json({ ok: true, message: 'Rating dihapus' }, ctx.env);
+  const summary = await ctx.env.DB.prepare(
+    'SELECT average, votes FROM rating_summary WHERE anime_id = ?'
+  )
+    .bind(animeId)
+    .first<{ average: number; votes: number }>();
+
+  return json(
+    {
+      ok: true,
+      data: {
+        animeId,
+        userScore: null,
+        average: summary?.average ?? 0,
+        votes: summary?.votes ?? 0,
+      },
+    },
+    ctx.env
+  );
 }
 
 export function mountRatings(router: Router): void {
