@@ -15,3 +15,6 @@ GOOGLE_CLIENT_ID = "98346168648-ferhj5ams83nirq87qtjoatl71g8qg5s.apps.googleuser
 binding = "DB"
 database_name = "qimochi-db"
 database_id = "9d6d7f39-3af8-4167-9db7-b9e0a64fdef9"
+
+[observability]
+enabled = true
