@@ -20,6 +20,7 @@ interface CommentRow {
   created_at: number;
   edited_at: number | null;
   name: string;
+  email: string;
   picture: string | null;
   likes: number;
   is_liked: number;
@@ -36,6 +37,7 @@ interface PublicComment {
   likes: number;
   isLiked: boolean;
   isOwn: boolean;
+  isAdmin: boolean;
   canEdit: boolean;
   user: {
     sub: string;
@@ -60,7 +62,20 @@ function newId(): string {
     .join('');
 }
 
-function toPublic(row: CommentRow, viewerSub: string | null): PublicComment {
+function adminSet(env: Ctx['env']): Set<string> {
+  return new Set(
+    (env.ADMIN_EMAILS ?? '')
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean)
+  );
+}
+
+function toPublic(
+  row: CommentRow,
+  viewerSub: string | null,
+  admins: Set<string>
+): PublicComment {
   const now = Math.floor(Date.now() / 1000);
   const isOwn = viewerSub !== null && viewerSub === row.user_id;
   const withinEdit =
@@ -77,6 +92,7 @@ function toPublic(row: CommentRow, viewerSub: string | null): PublicComment {
     likes: row.likes,
     isLiked: row.is_liked === 1,
     isOwn,
+    isAdmin: admins.has((row.email ?? '').toLowerCase()),
     canEdit: isOwn && withinEdit,
     user: {
       sub: row.user_id,
@@ -94,10 +110,11 @@ async function listComments(ctx: Ctx): Promise<Response> {
 
   const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
   const viewerSub = session?.sub ?? null;
+  const admins = adminSet(ctx.env);
 
   const baseSelect = `
     SELECT c.id, c.slug, c.user_id, c.parent_id, c.body, c.status,
-           c.created_at, c.edited_at, u.name, u.picture,
+           c.created_at, c.edited_at, u.name, u.email, u.picture,
            COALESCE(l.cnt, 0) as likes,
            CASE WHEN ul.user_id IS NULL THEN 0 ELSE 1 END as is_liked
       FROM comments c
@@ -138,7 +155,7 @@ async function listComments(ctx: Ctx): Promise<Response> {
     rows = res.results ?? [];
   }
 
-  const data = rows.map((r) => toPublic(r, viewerSub));
+  const data = rows.map((r) => toPublic(r, viewerSub, admins));
 
   return json({ data, total: data.length }, ctx.env, 200, {
     'Cache-Control': 'no-store',
@@ -164,9 +181,7 @@ async function createComment(ctx: Ctx): Promise<Response> {
   }
 
   const slug = slugify(body.slug ?? '');
-  if (!slug) {
-    return error('MISSING_SLUG', 'Slug wajib diisi', ctx.env, 400);
-  }
+  if (!slug) return error('MISSING_SLUG', 'Slug wajib diisi', ctx.env, 400);
 
   const rawText = typeof body.body === 'string' ? body.body : '';
   const text = sanitizeBody(rawText);
@@ -240,6 +255,7 @@ async function createComment(ctx: Ctx): Promise<Response> {
 
   const id = newId();
   const now = Math.floor(Date.now() / 1000);
+  const admins = adminSet(ctx.env);
 
   await ctx.env.DB.prepare(
     `INSERT INTO comments (id, slug, user_id, parent_id, body, status, created_at)
@@ -273,6 +289,7 @@ async function createComment(ctx: Ctx): Promise<Response> {
         likes: 0,
         isLiked: false,
         isOwn: true,
+        isAdmin: admins.has(session.email.toLowerCase()),
         canEdit: true,
         user: {
           sub: session.sub,
@@ -288,14 +305,10 @@ async function createComment(ctx: Ctx): Promise<Response> {
 
 async function deleteComment(ctx: Ctx): Promise<Response> {
   const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
-  if (!session) {
-    return error('UNAUTHORIZED', 'Login dulu', ctx.env, 401);
-  }
+  if (!session) return error('UNAUTHORIZED', 'Login dulu', ctx.env, 401);
 
   const id = ctx.params.id!;
-  if (!id) {
-    return error('MISSING_ID', 'ID komentar wajib diisi', ctx.env, 400);
-  }
+  if (!id) return error('MISSING_ID', 'ID komentar wajib diisi', ctx.env, 400);
 
   const row = await ctx.env.DB.prepare(
     `SELECT id, slug, user_id, parent_id FROM comments WHERE id = ?`
@@ -308,11 +321,11 @@ async function deleteComment(ctx: Ctx): Promise<Response> {
       parent_id: string | null;
     }>();
 
-  if (!row) {
-    return error('NOT_FOUND', 'Komentar tidak ditemukan', ctx.env, 404);
-  }
+  if (!row) return error('NOT_FOUND', 'Komentar tidak ditemukan', ctx.env, 404);
 
-  if (row.user_id !== session.sub) {
+  const admins = adminSet(ctx.env);
+  const isAdmin = admins.has(session.email.toLowerCase());
+  if (row.user_id !== session.sub && !isAdmin) {
     return error('FORBIDDEN', 'Bukan komentar kamu', ctx.env, 403);
   }
 
@@ -344,14 +357,10 @@ async function deleteComment(ctx: Ctx): Promise<Response> {
 
 async function editComment(ctx: Ctx): Promise<Response> {
   const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
-  if (!session) {
-    return error('UNAUTHORIZED', 'Login dulu', ctx.env, 401);
-  }
+  if (!session) return error('UNAUTHORIZED', 'Login dulu', ctx.env, 401);
 
   const id = ctx.params.id!;
-  if (!id) {
-    return error('MISSING_ID', 'ID komentar wajib diisi', ctx.env, 400);
-  }
+  if (!id) return error('MISSING_ID', 'ID komentar wajib diisi', ctx.env, 400);
 
   let body: { body?: string };
   try {
@@ -379,16 +388,16 @@ async function editComment(ctx: Ctx): Promise<Response> {
       status: string;
     }>();
 
-  if (!row) {
-    return error('NOT_FOUND', 'Komentar tidak ditemukan', ctx.env, 404);
-  }
+  if (!row) return error('NOT_FOUND', 'Komentar tidak ditemukan', ctx.env, 404);
 
-  if (row.user_id !== session.sub) {
+  const admins = adminSet(ctx.env);
+  const isAdmin = admins.has(session.email.toLowerCase());
+  if (row.user_id !== session.sub && !isAdmin) {
     return error('FORBIDDEN', 'Bukan komentar kamu', ctx.env, 403);
   }
 
   const now = Math.floor(Date.now() / 1000);
-  if (now - row.created_at > EDIT_WINDOW_SEC) {
+  if (now - row.created_at > EDIT_WINDOW_SEC && !isAdmin) {
     return error('EDIT_EXPIRED', 'Batas waktu edit sudah lewat', ctx.env, 400);
   }
 
@@ -405,14 +414,10 @@ async function editComment(ctx: Ctx): Promise<Response> {
 
 async function toggleLike(ctx: Ctx): Promise<Response> {
   const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
-  if (!session) {
-    return error('UNAUTHORIZED', 'Login dulu', ctx.env, 401);
-  }
+  if (!session) return error('UNAUTHORIZED', 'Login dulu', ctx.env, 401);
 
   const id = ctx.params.id!;
-  if (!id) {
-    return error('MISSING_ID', 'ID komentar wajib diisi', ctx.env, 400);
-  }
+  if (!id) return error('MISSING_ID', 'ID komentar wajib diisi', ctx.env, 400);
 
   const row = await ctx.env.DB.prepare(
     `SELECT id, status FROM comments WHERE id = ?`
@@ -426,9 +431,7 @@ async function toggleLike(ctx: Ctx): Promise<Response> {
 
   const key = await hashKey(`like:${session.sub}`);
   const limit = await checkRateLimit(ctx.env.DB, `${key}:m`, 30, 60);
-  if (!limit.ok) {
-    return error('RATE_LIMITED', 'Terlalu cepat', ctx.env, 429);
-  }
+  if (!limit.ok) return error('RATE_LIMITED', 'Terlalu cepat', ctx.env, 429);
 
   const existing = await ctx.env.DB.prepare(
     `SELECT 1 FROM comment_likes WHERE comment_id = ? AND user_id = ?`
@@ -467,14 +470,10 @@ async function toggleLike(ctx: Ctx): Promise<Response> {
 
 async function reportComment(ctx: Ctx): Promise<Response> {
   const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
-  if (!session) {
-    return error('UNAUTHORIZED', 'Login dulu', ctx.env, 401);
-  }
+  if (!session) return error('UNAUTHORIZED', 'Login dulu', ctx.env, 401);
 
   const id = ctx.params.id!;
-  if (!id) {
-    return error('MISSING_ID', 'ID komentar wajib diisi', ctx.env, 400);
-  }
+  if (!id) return error('MISSING_ID', 'ID komentar wajib diisi', ctx.env, 400);
 
   let body: { reason?: string };
   try {
@@ -500,15 +499,11 @@ async function reportComment(ctx: Ctx): Promise<Response> {
       name: string;
     }>();
 
-  if (!row) {
-    return error('NOT_FOUND', 'Komentar tidak ditemukan', ctx.env, 404);
-  }
+  if (!row) return error('NOT_FOUND', 'Komentar tidak ditemukan', ctx.env, 404);
 
   const key = await hashKey(`report:${session.sub}`);
   const limit = await checkRateLimit(ctx.env.DB, `${key}:h`, 10, 3600);
-  if (!limit.ok) {
-    return error('RATE_LIMITED', 'Batas report tercapai', ctx.env, 429);
-  }
+  if (!limit.ok) return error('RATE_LIMITED', 'Batas report tercapai', ctx.env, 429);
 
   const now = Math.floor(Date.now() / 1000);
   const reportId = newId();
@@ -544,10 +539,13 @@ async function reportComment(ctx: Ctx): Promise<Response> {
         chatId,
         text,
         inlineKeyboard: [
+          [{ text: '❌ Reject', callback_data: `reject:${id}` }],
           [
-            { text: '❌ Reject', callback_data: `reject:${id}` },
+            {
+              text: '🔗 Buka halaman',
+              url: `https://qimochi.web.id/anime/${encodeURIComponent(row.slug)}/`,
+            },
           ],
-          [{ text: '🔗 Buka halaman', url: `https://qimochi.web.id/anime/${encodeURIComponent(row.slug)}/` }],
         ],
       }).catch((err) => console.error('[telegram] report notify failed', err))
     );
