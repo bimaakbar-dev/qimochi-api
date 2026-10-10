@@ -34,6 +34,57 @@ async function purgeCacheForSlug(slug: string): Promise<void> {
   }
 }
 
+export async function notifyAutoRejected(
+  env: Ctx['env'],
+  input: {
+    id: string;
+    slug: string;
+    body: string;
+    userName: string;
+    reason: string;
+    matched: string | null;
+  }
+): Promise<void> {
+  const token = env.TELEGRAM_BOT_TOKEN;
+  const chatId = env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) return;
+
+  const preview =
+    input.body.length > 300 ? input.body.slice(0, 300) + '…' : input.body;
+
+  const text = [
+    `<b>🛑 Komentar ditolak otomatis</b>`,
+    ``,
+    `<b>Slug:</b> <code>${escapeHtml(input.slug)}</code>`,
+    `<b>Dari:</b> ${escapeHtml(input.userName)}`,
+    input.matched
+      ? `<b>Kata terdeteksi:</b> <code>${escapeHtml(input.matched)}</code>`
+      : '',
+    `<b>Alasan:</b> ${escapeHtml(input.reason)}`,
+    ``,
+    `<b>Isi:</b>`,
+    escapeHtml(preview),
+    ``,
+    `<i>ID: ${input.id}</i>`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  await sendMessage(token, {
+    chatId,
+    text,
+    inlineKeyboard: [
+      [{ text: '✅ Terima paksa', callback_data: `approve:${input.id}` }],
+      [
+        {
+          text: '🔗 Buka halaman',
+          url: `https://qimochi.web.id/anime/${encodeURIComponent(input.slug)}/`,
+        },
+      ],
+    ],
+  });
+}
+
 export async function notifyTelegram(
   env: Ctx['env'],
   comment: PendingComment
