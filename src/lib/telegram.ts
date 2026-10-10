@@ -55,6 +55,18 @@ export async function sendMessage(
   return { ok: true, messageId: result.result?.message_id };
 }
 
+export async function deleteMessage(
+  token: string,
+  chatId: string,
+  messageId: number
+): Promise<{ ok: boolean }> {
+  const result = await callApi(token, 'deleteMessage', {
+    chat_id: chatId,
+    message_id: messageId,
+  });
+  return { ok: result.ok };
+}
+
 export async function editMessageText(
   token: string,
   chatId: string,
