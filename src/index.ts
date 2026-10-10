@@ -6,6 +6,7 @@ import { mountAuth } from './routes/auth';
 import { mountComments } from './routes/comments';
 import { mountBot } from './routes/bot';
 import { mountTelegram } from './routes/telegram';
+import { mountReactions } from './routes/reactions';
 
 const router = createRouter();
 mountRatings(router);
@@ -13,6 +14,7 @@ mountAuth(router);
 mountComments(router);
 mountBot(router);
 mountTelegram(router);
+mountReactions(router);
 
 export default {
   async fetch(
