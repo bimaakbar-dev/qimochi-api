@@ -3,7 +3,8 @@ import { json, error } from '../lib/response';
 import { getSession } from '../lib/session';
 import { verifyTurnstile } from '../lib/turnstile';
 import { checkRateLimit, getClientIp, hashKey } from '../lib/ratelimit';
-import { notifyTelegram } from './telegram';
+import { notifyTelegram, notifyAutoRejected } from './telegram';
+import { moderate } from '../lib/moderation';
 import { sendMessage, escapeHtml } from '../lib/telegram';
 
 const MAX_BODY_LEN = 2000;
@@ -253,44 +254,84 @@ async function createComment(ctx: Ctx): Promise<Response> {
     parentId = parent.id;
   }
 
+  const moderation = moderate(text, ctx.env);
+  const status = moderation.decision;
+  const isApproved = status === 'approved';
+  const isRejected = status === 'rejected';
+
   const id = newId();
   const now = Math.floor(Date.now() / 1000);
   const admins = adminSet(ctx.env);
 
-  await ctx.env.DB.prepare(
-    `INSERT INTO comments (id, slug, user_id, parent_id, body, status, created_at)
-     VALUES (?, ?, ?, ?, ?, 'pending', ?)`
-  )
-    .bind(id, slug, session.sub, parentId, text, now)
-    .run();
+  const moderatedBy = isApproved
+    ? 'bot:auto'
+    : isRejected
+    ? 'bot:badword'
+    : null;
 
-  ctx.exec.waitUntil(
-    notifyTelegram(ctx.env, {
+  await ctx.env.DB.prepare(
+    `INSERT INTO comments
+       (id, slug, user_id, parent_id, body, status, created_at,
+        approved_at, moderated_by, reason)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  )
+    .bind(
       id,
       slug,
-      body: text,
-      userName: session.name,
-      userEmail: session.email,
-    }).catch((err) => console.error('[telegram] notify failed', err))
-  );
+      session.sub,
+      parentId,
+      text,
+      status,
+      now,
+      isApproved ? now : null,
+      moderatedBy,
+      moderation.reason || null
+    )
+    .run();
+
+  if (status === 'pending') {
+    ctx.exec.waitUntil(
+      notifyTelegram(ctx.env, {
+        id,
+        slug,
+        body: text,
+        userName: session.name,
+        userEmail: session.email,
+      }).catch((err) => console.error('[telegram] notify failed', err))
+    );
+  } else if (isRejected) {
+    ctx.exec.waitUntil(
+      notifyAutoRejected(ctx.env, {
+        id,
+        slug,
+        body: text,
+        userName: session.name,
+        reason: moderation.reason,
+        matched: moderation.matched,
+      }).catch((err) =>
+        console.error('[telegram] auto-rejected notify failed', err)
+      )
+    );
+  }
 
   return json(
     {
       ok: true,
-      status: 'pending',
+      status,
+      reason: moderation.reason || null,
       data: {
         id,
         slug,
         parentId,
         body: text,
-        status: 'pending',
+        status,
         createdAt: now,
         editedAt: null,
         likes: 0,
         isLiked: false,
         isOwn: true,
         isAdmin: admins.has(session.email.toLowerCase()),
-        canEdit: true,
+        canEdit: status !== 'rejected',
         user: {
           sub: session.sub,
           name: session.name,
@@ -401,15 +442,42 @@ async function editComment(ctx: Ctx): Promise<Response> {
     return error('EDIT_EXPIRED', 'Batas waktu edit sudah lewat', ctx.env, 400);
   }
 
+  const moderation = moderate(text, ctx.env);
+  const status = moderation.decision;
+  const isApproved = status === 'approved';
+  const isRejected = status === 'rejected';
+
+  const moderatedBy = isApproved
+    ? 'bot:auto'
+    : isRejected
+    ? 'bot:badword'
+    : null;
+
   await ctx.env.DB.prepare(
     `UPDATE comments
-        SET body = ?, edited_at = ?, status = 'pending', approved_at = NULL
+        SET body = ?,
+            edited_at = ?,
+            status = ?,
+            approved_at = ?,
+            moderated_by = ?,
+            reason = ?
       WHERE id = ?`
   )
-    .bind(text, now, id)
+    .bind(
+      text,
+      now,
+      status,
+      isApproved ? now : null,
+      moderatedBy,
+      moderation.reason || null,
+      id
+    )
     .run();
 
-  return json({ ok: true, id, editedAt: now }, ctx.env);
+  return json(
+    { ok: true, id, editedAt: now, status, reason: moderation.reason || null },
+    ctx.env
+  );
 }
 
 async function toggleLike(ctx: Ctx): Promise<Response> {
