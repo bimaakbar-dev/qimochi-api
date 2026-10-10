@@ -14,6 +14,7 @@ interface CommentRow {
   user_id: string;
   parent_id: string | null;
   body: string;
+  status: string;
   created_at: number;
   name: string;
   picture: string | null;
@@ -24,7 +25,9 @@ interface PublicComment {
   slug: string;
   parentId: string | null;
   body: string;
+  status: string;
   createdAt: number;
+  isOwn: boolean;
   user: {
     sub: string;
     name: string;
@@ -48,13 +51,15 @@ function newId(): string {
     .join('');
 }
 
-function toPublic(row: CommentRow): PublicComment {
+function toPublic(row: CommentRow, viewerSub: string | null): PublicComment {
   return {
     id: row.id,
     slug: row.slug,
     parentId: row.parent_id,
     body: row.body,
+    status: row.status,
     createdAt: row.created_at,
+    isOwn: viewerSub !== null && viewerSub === row.user_id,
     user: {
       sub: row.user_id,
       name: row.name,
@@ -69,22 +74,46 @@ async function listComments(ctx: Ctx): Promise<Response> {
     return error('MISSING_SLUG', 'Query slug wajib diisi', ctx.env, 400);
   }
 
-  const { results } = await ctx.env.DB.prepare(
-    `SELECT c.id, c.slug, c.user_id, c.parent_id, c.body, c.created_at,
-            u.name, u.picture
-       FROM comments c
-       JOIN users u ON u.id = c.user_id
-      WHERE c.slug = ? AND c.status = 'approved'
-      ORDER BY c.created_at ASC
-      LIMIT 300`
-  )
-    .bind(slug)
-    .all<CommentRow>();
+  const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
+  const viewerSub = session?.sub ?? null;
 
-  const data = (results ?? []).map(toPublic);
+  let rows: CommentRow[] = [];
+
+  if (viewerSub) {
+    const res = await ctx.env.DB.prepare(
+      `SELECT c.id, c.slug, c.user_id, c.parent_id, c.body, c.status,
+              c.created_at, u.name, u.picture
+         FROM comments c
+         JOIN users u ON u.id = c.user_id
+        WHERE c.slug = ? AND (
+          c.status = 'approved'
+          OR (c.user_id = ? AND c.status IN ('pending', 'rejected'))
+        )
+        ORDER BY c.created_at ASC
+        LIMIT 300`
+    )
+      .bind(slug, viewerSub)
+      .all<CommentRow>();
+    rows = res.results ?? [];
+  } else {
+    const res = await ctx.env.DB.prepare(
+      `SELECT c.id, c.slug, c.user_id, c.parent_id, c.body, c.status,
+              c.created_at, u.name, u.picture
+         FROM comments c
+         JOIN users u ON u.id = c.user_id
+        WHERE c.slug = ? AND c.status = 'approved'
+        ORDER BY c.created_at ASC
+        LIMIT 300`
+    )
+      .bind(slug)
+      .all<CommentRow>();
+    rows = res.results ?? [];
+  }
+
+  const data = rows.map((r) => toPublic(r, viewerSub));
 
   return json({ data, total: data.length }, ctx.env, 200, {
-    'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=300',
+    'Cache-Control': 'no-store',
   });
 }
 
@@ -201,43 +230,73 @@ async function createComment(ctx: Ctx): Promise<Response> {
     }).catch((err) => console.error('[telegram] notify failed', err))
   );
 
-  const webhookUrl = ctx.env.BOT_WEBHOOK;
-  if (webhookUrl) {
-    ctx.exec.waitUntil(
-      fetch(webhookUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          event: 'comment.created',
-          comment: {
-            id,
-            slug,
-            parentId,
-            body: text,
-            createdAt: now,
-            user: {
-              sub: session.sub,
-              name: session.name,
-              email: session.email,
-            },
-          },
-        }),
-      }).catch(() => undefined)
-    );
-  }
-
   return json(
     {
       ok: true,
       status: 'pending',
-      data: { id, slug, parentId, body: text, createdAt: now },
+      data: {
+        id,
+        slug,
+        parentId,
+        body: text,
+        status: 'pending',
+        createdAt: now,
+        isOwn: true,
+        user: {
+          sub: session.sub,
+          name: session.name,
+          picture: session.picture ?? null,
+        },
+      },
     },
     ctx.env,
     201
   );
 }
 
+async function deleteComment(ctx: Ctx): Promise<Response> {
+  const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
+  if (!session) {
+    return error('UNAUTHORIZED', 'Login dulu', ctx.env, 401);
+  }
+
+  const id = ctx.params.id!;
+  if (!id) {
+    return error('MISSING_ID', 'ID komentar wajib diisi', ctx.env, 400);
+  }
+
+  const row = await ctx.env.DB.prepare(
+    `SELECT id, slug, user_id, parent_id FROM comments WHERE id = ?`
+  )
+    .bind(id)
+    .first<{
+      id: string;
+      slug: string;
+      user_id: string;
+      parent_id: string | null;
+    }>();
+
+  if (!row) {
+    return error('NOT_FOUND', 'Komentar tidak ditemukan', ctx.env, 404);
+  }
+
+  if (row.user_id !== session.sub) {
+    return error('FORBIDDEN', 'Bukan komentar kamu', ctx.env, 403);
+  }
+
+  await ctx.env.DB.prepare(`DELETE FROM comments WHERE id = ?`).bind(id).run();
+
+  if (row.parent_id === null) {
+    await ctx.env.DB.prepare(`DELETE FROM comments WHERE parent_id = ?`)
+      .bind(id)
+      .run();
+  }
+
+  return json({ ok: true, id }, ctx.env);
+}
+
 export function mountComments(router: Router): void {
   router.get('/api/v1/comments', listComments);
   router.post('/api/v1/comments', createComment);
+  router.delete('/api/v1/comments/:id', deleteComment);
 }
