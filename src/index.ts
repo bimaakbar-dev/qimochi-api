@@ -8,6 +8,7 @@ import { mountBot } from './routes/bot';
 import { mountTelegram } from './routes/telegram';
 import { mountReactions } from './routes/reactions';
 import { mountBookmarks } from './routes/bookmarks';
+import { mountVotes } from './routes/votes';
 
 const router = createRouter();
 mountRatings(router);
@@ -17,6 +18,7 @@ mountBot(router);
 mountTelegram(router);
 mountReactions(router);
 mountBookmarks(router);
+mountVotes(router);
 
 export default {
   async fetch(
