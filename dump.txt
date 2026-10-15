@@ -1,0 +1,3784 @@
+# Repo: bimaakbar-dev/qimochi-api
+# Commit: 3e814111e2206c933dc2a1c2ff151fcc7fb99510
+
+## Struktur file
+.github/workflows/deploy.yml
+.github/workflows/dump.yml
+.github/workflows/generate-lock.yml
+README.md
+package.json
+src/env.d.ts
+src/index.ts
+src/lib/botauth.ts
+src/lib/google.ts
+src/lib/jwt.ts
+src/lib/moderation.ts
+src/lib/ratelimit.ts
+src/lib/ratings.ts
+src/lib/response.ts
+src/lib/router.ts
+src/lib/session.ts
+src/lib/telegram.ts
+src/lib/turnstile.ts
+src/routes/auth.ts
+src/routes/bookmarks.ts
+src/routes/bot.ts
+src/routes/comments.ts
+src/routes/probe.ts
+src/routes/ratings.ts
+src/routes/reactions.ts
+src/routes/telegram.ts
+src/routes/votes.ts
+tsconfig.json
+wrangler.toml
+
+## Isi file
+
+===== FILE: .github/workflows/deploy.yml =====
+name: Deploy Workers
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Deploy to Cloudflare Workers
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+===== FILE: .github/workflows/dump.yml =====
+name: Dump repo
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_kb:
+        description: Batas ukuran per file (KB)
+        default: '200'
+
+permissions:
+  contents: write
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Gabungkan isi repo
+        env:
+          MAX_KB: ${{ inputs.max_kb }}
+        run: |
+          OUT=dump.txt
+          MAX=$(( ${MAX_KB:-200} * 1024 ))
+          SKIP='(^|/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?)$|^src/content/anime/|^src/data/anime/'
+
+          {
+            echo "# Repo: $GITHUB_REPOSITORY"
+            echo "# Commit: $GITHUB_SHA"
+            echo
+            echo "## Struktur file"
+            git ls-files | grep -Ev "$SKIP"
+            echo
+            echo "## Isi file"
+          } > "$OUT"
+
+          : > skipped.txt
+
+          git ls-files -z | while IFS= read -r -d '' f; do
+            if echo "$f" | grep -Eq "$SKIP"; then continue; fi
+            [ -f "$f" ] || continue
+
+            if ! grep -Iq . "$f"; then
+              echo "biner atau kosong: $f" >> skipped.txt
+              continue
+            fi
+
+            size=$(wc -c < "$f")
+            if [ "$size" -gt "$MAX" ]; then
+              echo "terlalu besar ($size byte): $f" >> skipped.txt
+              continue
+            fi
+
+            {
+              echo
+              echo "===== FILE: $f ====="
+              cat "$f"
+            } >> "$OUT"
+          done
+
+          {
+            echo
+            echo "## File yang dilewati"
+            cat skipped.txt
+          } >> "$OUT"
+
+          {
+            echo "### Dump selesai"
+            echo "Ukuran: $(wc -c < "$OUT") byte"
+            echo "Dilewati: $(wc -l < skipped.txt) file"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Simpan hasil ke branch dump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git checkout --orphan dump
+          git rm -rf --quiet .
+          git add dump.txt
+          git commit -m "Dump repo @ ${GITHUB_SHA::7}"
+          git push --force origin dump
+
+          echo "File: https://github.com/$GITHUB_REPOSITORY/blob/dump/dump.txt" >> "$GITHUB_STEP_SUMMARY"
+===== FILE: .github/workflows/generate-lock.yml =====
+name: Generate Package Lock
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  lock:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Generate lock file
+        run: npm install --package-lock-only
+
+      - name: Commit & push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package-lock.json
+          if git diff --staged --quiet; then
+            echo "Lock file tidak berubah, skip commit."
+          else
+            git commit -m "chore: generate package-lock.json"
+            git push
+          fi
+===== FILE: README.md =====
+# qimochi-bot
+===== FILE: package.json =====
+{
+  "name": "qimochi-api",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "types": "wrangler types"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250109.0",
+    "typescript": "^5.7.0",
+    "wrangler": "^3.100.0"
+  }
+}
+===== FILE: src/env.d.ts =====
+export interface Env {
+  DB: D1Database;
+  ALLOWED_ORIGIN: string;
+  GOOGLE_CLIENT_ID: string;
+  SESSION_SECRET: string;
+  TURNSTILE_SECRET: string;
+  BOT_SECRET: string;
+  BOT_WEBHOOK?: string;
+  TELEGRAM_BOT_TOKEN: string;
+  TELEGRAM_CHAT_ID: string;
+  TELEGRAM_WEBHOOK_SECRET: string;
+  ADMIN_EMAILS: string;
+  BAD_WORDS?: string;
+  AUTO_MODERATE?: string;
+}
+
+===== FILE: src/index.ts =====
+import type { Env } from './env';
+import { createRouter } from './lib/router';
+import { json, error, corsHeaders } from './lib/response';
+import { mountRatings } from './routes/ratings';
+import { mountAuth } from './routes/auth';
+import { mountComments } from './routes/comments';
+import { mountBot } from './routes/bot';
+import { mountTelegram } from './routes/telegram';
+import { mountReactions } from './routes/reactions';
+import { mountBookmarks } from './routes/bookmarks';
+import { mountVotes } from './routes/votes';
+import { mountProbe } from './routes/probe';
+
+const router = createRouter();
+mountRatings(router);
+mountAuth(router);
+mountComments(router);
+mountBot(router);
+mountTelegram(router);
+mountReactions(router);
+mountBookmarks(router);
+mountVotes(router);
+mountProbe(router);
+
+export default {
+  async fetch(
+    request: Request,
+    env: Env,
+    exec: ExecutionContext
+  ): Promise<Response> {
+    const url = new URL(request.url);
+
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: corsHeaders(env) });
+    }
+
+    if (url.pathname === '/' || url.pathname === '/health') {
+      return json({ name: 'Qimochi API', version: 'v1', status: 'ok' }, env);
+    }
+
+    const matched = router.match(request.method, url.pathname);
+    if (!matched) {
+      return error('NOT_FOUND', `Path ${url.pathname} tidak ditemukan`, env, 404);
+    }
+
+    try {
+      return await matched.handler({
+        request,
+        env,
+        exec,
+        url,
+        params: matched.params,
+      });
+    } catch (err) {
+      console.error('[worker error]', err);
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      return error('INTERNAL_ERROR', `Server error: ${msg}`, env, 500);
+    }
+  },
+} satisfies ExportedHandler<Env>;
+
+===== FILE: src/lib/botauth.ts =====
+export async function constantTimeEqual(
+  a: string,
+  b: string
+): Promise<boolean> {
+  const enc = new TextEncoder();
+  const ha = new Uint8Array(
+    await crypto.subtle.digest('SHA-256', enc.encode(a))
+  );
+  const hb = new Uint8Array(
+    await crypto.subtle.digest('SHA-256', enc.encode(b))
+  );
+  let diff = 0;
+  for (let i = 0; i < ha.length; i++) diff |= ha[i]! ^ hb[i]!;
+  return diff === 0;
+}
+
+export function extractBearer(request: Request): string | null {
+  const header = request.headers.get('Authorization');
+  if (!header) return null;
+  const m = header.match(/^Bearer\s+(.+)$/i);
+  return m ? m[1]!.trim() : null;
+}
+
+export async function requireBot(
+  request: Request,
+  secret: string
+): Promise<boolean> {
+  if (!secret) return false;
+  const token = extractBearer(request);
+  if (!token) return false;
+  return constantTimeEqual(token, secret);
+}
+===== FILE: src/lib/google.ts =====
+export interface GoogleUser {
+  sub: string;
+  email: string;
+  name: string;
+  picture?: string;
+  emailVerified: boolean;
+}
+
+interface Jwk {
+  kid: string;
+  kty: string;
+  alg: string;
+  n: string;
+  e: string;
+}
+
+interface Jwks {
+  keys: Jwk[];
+}
+
+interface IdTokenPayload {
+  iss: string;
+  aud: string;
+  sub: string;
+  email: string;
+  email_verified: boolean;
+  name: string;
+  picture?: string;
+  exp: number;
+  iat: number;
+}
+
+const JWKS_URL = 'https://www.googleapis.com/oauth2/v3/certs';
+const JWKS_TTL = 3600;
+
+let cachedJwks: { data: Jwks; exp: number } | null = null;
+
+function b64urlToUint8(b64: string): Uint8Array {
+  const pad = b64.length % 4 === 0 ? '' : '='.repeat(4 - (b64.length % 4));
+  const s = b64.replace(/-/g, '+').replace(/_/g, '/') + pad;
+  const bin = atob(s);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+async function getJwks(): Promise<Jwks> {
+  const now = Math.floor(Date.now() / 1000);
+  if (cachedJwks && cachedJwks.exp > now) return cachedJwks.data;
+
+  const res = await fetch(JWKS_URL);
+  if (!res.ok) throw new Error(`JWKS fetch failed: ${res.status}`);
+  const data = (await res.json()) as Jwks;
+  cachedJwks = { data, exp: now + JWKS_TTL };
+  return data;
+}
+
+async function importKey(jwk: Jwk): Promise<CryptoKey> {
+  return crypto.subtle.importKey(
+    'jwk',
+    { kty: jwk.kty, n: jwk.n, e: jwk.e, alg: 'RS256', ext: true },
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+    false,
+    ['verify']
+  );
+}
+
+export async function verifyGoogleIdToken(
+  token: string,
+  clientId: string
+): Promise<GoogleUser | null> {
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+
+  const headerB64 = parts[0]!;
+  const payloadB64 = parts[1]!;
+  const sigB64 = parts[2]!;
+
+  let header: { alg: string; kid: string };
+  try {
+    header = JSON.parse(
+      new TextDecoder().decode(b64urlToUint8(headerB64))
+    ) as { alg: string; kid: string };
+  } catch {
+    return null;
+  }
+
+  if (header.alg !== 'RS256' || !header.kid) return null;
+
+  let jwks: Jwks;
+  try {
+    jwks = await getJwks();
+  } catch {
+    return null;
+  }
+
+  const jwk = jwks.keys.find((k) => k.kid === header.kid);
+  if (!jwk) return null;
+
+  let valid = false;
+  try {
+    const key = await importKey(jwk);
+    valid = await crypto.subtle.verify(
+      'RSASSA-PKCS1-v1_5',
+      key,
+      b64urlToUint8(sigB64),
+      new TextEncoder().encode(`${headerB64}.${payloadB64}`)
+    );
+  } catch {
+    return null;
+  }
+  if (!valid) return null;
+
+  let payload: IdTokenPayload;
+  try {
+    payload = JSON.parse(
+      new TextDecoder().decode(b64urlToUint8(payloadB64))
+    ) as IdTokenPayload;
+  } catch {
+    return null;
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  if (payload.exp < now) return null;
+  if (
+    payload.iss !== 'https://accounts.google.com' &&
+    payload.iss !== 'accounts.google.com'
+  ) {
+    return null;
+  }
+  if (payload.aud !== clientId) return null;
+  if (!payload.email_verified) return null;
+
+  return {
+    sub: payload.sub,
+    email: payload.email,
+    name: payload.name,
+    picture: payload.picture,
+    emailVerified: true,
+  };
+}
+===== FILE: src/lib/jwt.ts =====
+export interface JwtPayload {
+  sub: string;
+  email: string;
+  name: string;
+  picture?: string;
+  iat: number;
+  exp: number;
+}
+
+function b64urlEncode(bytes: Uint8Array): string {
+  let bin = '';
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function b64urlDecode(str: string): Uint8Array {
+  const pad = str.length % 4 === 0 ? '' : '='.repeat(4 - (str.length % 4));
+  const b64 = str.replace(/-/g, '+').replace(/_/g, '/') + pad;
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function encodeJson(obj: unknown): string {
+  return b64urlEncode(new TextEncoder().encode(JSON.stringify(obj)));
+}
+
+async function getKey(secret: string): Promise<CryptoKey> {
+  return crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign', 'verify']
+  );
+}
+
+export async function signJwt(
+  payload: JwtPayload,
+  secret: string
+): Promise<string> {
+  const headerB64 = encodeJson({ alg: 'HS256', typ: 'JWT' });
+  const payloadB64 = encodeJson(payload);
+  const data = `${headerB64}.${payloadB64}`;
+  const key = await getKey(secret);
+  const sig = await crypto.subtle.sign(
+    'HMAC',
+    key,
+    new TextEncoder().encode(data)
+  );
+  return `${data}.${b64urlEncode(new Uint8Array(sig))}`;
+}
+
+export async function verifyJwt(
+  token: string,
+  secret: string
+): Promise<JwtPayload | null> {
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+
+  const headerB64 = parts[0]!;
+  const payloadB64 = parts[1]!;
+  const sigB64 = parts[2]!;
+  const data = `${headerB64}.${payloadB64}`;
+
+  const key = await getKey(secret);
+  let valid = false;
+  try {
+    valid = await crypto.subtle.verify(
+      'HMAC',
+      key,
+      b64urlDecode(sigB64),
+      new TextEncoder().encode(data)
+    );
+  } catch {
+    return null;
+  }
+  if (!valid) return null;
+
+  let payload: JwtPayload;
+  try {
+    payload = JSON.parse(
+      new TextDecoder().decode(b64urlDecode(payloadB64))
+    ) as JwtPayload;
+  } catch {
+    return null;
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  if (typeof payload.exp !== 'number' || payload.exp < now) return null;
+
+  return payload;
+}
+===== FILE: src/lib/moderation.ts =====
+export type ModerationDecision = 'approved' | 'rejected' | 'pending';
+
+export interface ModerationResult {
+  decision: ModerationDecision;
+  reason: string;
+  matched: string | null;
+}
+
+interface ModerationEnv {
+  BAD_WORDS?: string;
+  AUTO_MODERATE?: string;
+}
+
+const LEET_MAP: Record<string, string> = {
+  '0': 'o',
+  '1': 'i',
+  '3': 'e',
+  '4': 'a',
+  '5': 's',
+  '7': 't',
+  '8': 'b',
+  '@': 'a',
+  $: 's',
+};
+
+const SUSPICIOUS_TLDS = [
+  '.tk',
+  '.ml',
+  '.ga',
+  '.cf',
+  '.gq',
+  '.xyz',
+  '.top',
+  '.click',
+  '.work',
+  '.loan',
+  '.racing',
+  '.download',
+  '.stream',
+];
+
+function normalize(input: string): string {
+  let s = input.toLowerCase();
+  s = s.replace(/[0-9@$]/g, (m) => LEET_MAP[m] ?? m);
+  s = s.replace(/[^a-z\s]/g, ' ');
+  s = s.replace(/\s+/g, ' ').trim();
+  return s;
+}
+
+function collapseRepeats(input: string): string {
+  return input.replace(/(.)\1{2,}/g, '$1$1');
+}
+
+function parseBadWords(env: ModerationEnv): string[] {
+  const raw = env.BAD_WORDS ?? '';
+  return raw
+    .split(',')
+    .map((w) => normalize(collapseRepeats(w)))
+    .map((w) => w.trim())
+    .filter(Boolean);
+}
+
+function isAutoModerateOn(env: ModerationEnv): boolean {
+  const v = (env.AUTO_MODERATE ?? '').toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+}
+
+function countUrls(text: string): number {
+  const m = text.match(/https?:\/\/[^\s]+/gi);
+  return m ? m.length : 0;
+}
+
+function hasSuspiciousUrl(text: string): boolean {
+  const lower = text.toLowerCase();
+  for (const tld of SUSPICIOUS_TLDS) {
+    if (lower.includes(tld)) return true;
+  }
+  return false;
+}
+
+function capsRatio(text: string): number {
+  const letters = text.replace(/[^A-Za-z]/g, '');
+  if (letters.length < 15) return 0;
+  const upper = letters.replace(/[^A-Z]/g, '').length;
+  return upper / letters.length;
+}
+
+function tooManyRepeats(text: string): boolean {
+  return /(.)\1{9,}/.test(text);
+}
+
+export function moderate(text: string, env: ModerationEnv): ModerationResult {
+  const normalized = normalize(collapseRepeats(text));
+  const words = normalized.split(' ');
+
+  const badWords = parseBadWords(env);
+  for (const bw of badWords) {
+    const bwParts = bw.split(' ');
+    if (bwParts.length === 1) {
+      if (words.includes(bw)) {
+        return {
+          decision: 'rejected',
+          reason: `Mengandung kata terlarang`,
+          matched: bw,
+        };
+      }
+    } else {
+      if (normalized.includes(bw)) {
+        return {
+          decision: 'rejected',
+          reason: `Mengandung frasa terlarang`,
+          matched: bw,
+        };
+      }
+    }
+  }
+
+  if (countUrls(text) >= 3) {
+    return {
+      decision: 'pending',
+      reason: 'Banyak link — perlu review manual',
+      matched: null,
+    };
+  }
+
+  if (hasSuspiciousUrl(text)) {
+    return {
+      decision: 'pending',
+      reason: 'URL mencurigakan — perlu review manual',
+      matched: null,
+    };
+  }
+
+  if (capsRatio(text) > 0.7) {
+    return {
+      decision: 'pending',
+      reason: 'Terlalu banyak huruf kapital',
+      matched: null,
+    };
+  }
+
+  if (tooManyRepeats(text)) {
+    return {
+      decision: 'pending',
+      reason: 'Karakter berulang berlebihan',
+      matched: null,
+    };
+  }
+
+  if (isAutoModerateOn(env)) {
+    return {
+      decision: 'approved',
+      reason: 'Auto-approved',
+      matched: null,
+    };
+  }
+
+  return {
+    decision: 'pending',
+    reason: '',
+    matched: null,
+  };
+}
+
+===== FILE: src/lib/ratelimit.ts =====
+export interface RateLimitResult {
+  ok: boolean;
+  remaining: number;
+  retryAfter: number;
+}
+
+export function getClientIp(request: Request): string {
+  return request.headers.get('CF-Connecting-IP') ?? 'unknown';
+}
+
+export async function hashKey(input: string): Promise<string> {
+  const data = new TextEncoder().encode(input + '|qimochi-rl-v1');
+  const hash = await crypto.subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(hash))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
+    .slice(0, 32);
+}
+
+export async function checkRateLimit(
+  db: D1Database,
+  key: string,
+  max: number,
+  windowSec: number
+): Promise<RateLimitResult> {
+  const now = Math.floor(Date.now() / 1000);
+  const windowStart = now - windowSec;
+
+  const row = await db
+    .prepare('SELECT count, window_start FROM rate_limits WHERE key = ?')
+    .bind(key)
+    .first<{ count: number; window_start: number }>();
+
+  if (!row || row.window_start < windowStart) {
+    await db
+      .prepare(
+        `INSERT INTO rate_limits (key, count, window_start)
+         VALUES (?, 1, ?)
+         ON CONFLICT (key) DO UPDATE SET
+           count = 1,
+           window_start = excluded.window_start`
+      )
+      .bind(key, now)
+      .run();
+    return { ok: true, remaining: max - 1, retryAfter: 0 };
+  }
+
+  if (row.count >= max) {
+    return {
+      ok: false,
+      remaining: 0,
+      retryAfter: row.window_start + windowSec - now,
+    };
+  }
+
+  await db
+    .prepare('UPDATE rate_limits SET count = count + 1 WHERE key = ?')
+    .bind(key)
+    .run();
+
+  return { ok: true, remaining: max - row.count - 1, retryAfter: 0 };
+}
+
+export async function cleanupRateLimits(
+  db: D1Database,
+  olderThanSec: number
+): Promise<void> {
+  const cutoff = Math.floor(Date.now() / 1000) - olderThanSec;
+  await db
+    .prepare('DELETE FROM rate_limits WHERE window_start < ?')
+    .bind(cutoff)
+    .run();
+}
+===== FILE: src/lib/ratings.ts =====
+import type { Env } from '../env';
+import type { Ctx, Router } from '../lib/router';
+import { json, error } from '../lib/response';
+
+interface RatingRow {
+  anime_id: string;
+  average: number;
+  votes: number;
+}
+
+async function hashIP(ip: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(ip + 'qimochi-salt-v1');
+  const hash = await crypto.subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(hash))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
+    .slice(0, 16);
+}
+
+function getUserId(request: Request): string | null {
+  const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown';
+  return ip;
+}
+
+async function listAll(ctx: Ctx): Promise<Response> {
+  const { results } = await ctx.env.DB.prepare(
+    'SELECT anime_id, average, votes FROM rating_summary WHERE votes > 0 ORDER BY anime_id'
+  ).all<RatingRow>();
+
+  const data: Record<string, { average: number; votes: number }> = {};
+  for (const row of results ?? []) {
+    data[row.anime_id] = { average: row.average, votes: row.votes };
+  }
+
+  return json({ data, total: Object.keys(data).length }, ctx.env);
+}
+
+async function getOne(ctx: Ctx): Promise<Response> {
+  const animeId = ctx.params.id!;
+  const row = await ctx.env.DB.prepare(
+    'SELECT anime_id, average, votes FROM rating_summary WHERE anime_id = ?'
+  )
+    .bind(animeId)
+    .first<RatingRow>();
+
+  if (!row) return json({ data: { animeId, average: 0, votes: 0 } }, ctx.env);
+
+  return json(
+    { data: { animeId: row.anime_id, average: row.average, votes: row.votes } },
+    ctx.env
+  );
+}
+
+async function postOne(ctx: Ctx): Promise<Response> {
+  const animeId = ctx.params.id!;
+
+  let body: { score?: number };
+  try {
+    body = (await ctx.request.json()) as { score?: number };
+  } catch {
+    return error('INVALID_JSON', 'Body bukan JSON valid', ctx.env, 400);
+  }
+
+  const score = Number(body.score);
+  if (!Number.isInteger(score) || score < 1 || score > 5) {
+    return error('INVALID_SCORE', 'Score harus integer 1-5', ctx.env, 400);
+  }
+
+  const userId = getUserId(ctx.request);
+  if (!userId) return error('NO_USER_ID', 'Tidak bisa identifikasi user', ctx.env, 400);
+  const userHash = await hashIP(userId);
+
+  await ctx.env.DB.prepare(
+    `INSERT INTO ratings (anime_id, user_id, score)
+     VALUES (?, ?, ?)
+     ON CONFLICT (anime_id, user_id)
+     DO UPDATE SET score = excluded.score, updated_at = CURRENT_TIMESTAMP`
+  )
+    .bind(animeId, userHash, score)
+    .run();
+
+  await ctx.env.DB.prepare(
+    `INSERT INTO rating_summary (anime_id, average, votes, updated_at)
+     SELECT ?, COALESCE(AVG(score) * 2, 0), COUNT(*), CURRENT_TIMESTAMP
+     FROM ratings WHERE anime_id = ?
+     ON CONFLICT (anime_id)
+     DO UPDATE SET
+       average = excluded.average,
+       votes = excluded.votes,
+       updated_at = CURRENT_TIMESTAMP`
+  )
+    .bind(animeId, animeId)
+    .run();
+
+  const summary = await ctx.env.DB.prepare(
+    'SELECT average, votes FROM rating_summary WHERE anime_id = ?'
+  )
+    .bind(animeId)
+    .first<{ average: number; votes: number }>();
+
+  return json(
+    {
+      ok: true,
+      message: 'Rating tersimpan',
+      data: {
+        animeId,
+        yourScore: score,
+        average: summary?.average ?? 0,
+        votes: summary?.votes ?? 0,
+      },
+    },
+    ctx.env
+  );
+}
+
+async function deleteOne(ctx: Ctx): Promise<Response> {
+  const animeId = ctx.params.id!;
+
+  const userId = getUserId(ctx.request);
+  if (!userId) return error('NO_USER_ID', 'Tidak bisa identifikasi user', ctx.env, 400);
+  const userHash = await hashIP(userId);
+
+  const result = await ctx.env.DB.prepare(
+    'DELETE FROM ratings WHERE anime_id = ? AND user_id = ?'
+  )
+    .bind(animeId, userHash)
+    .run();
+
+  if ((result.meta?.changes ?? 0) === 0) {
+    return error('NOT_FOUND', 'Rating tidak ditemukan', ctx.env, 404);
+  }
+
+  await ctx.env.DB.prepare(
+    `INSERT INTO rating_summary (anime_id, average, votes, updated_at)
+     SELECT ?, COALESCE(AVG(score) * 2, 0), COUNT(*), CURRENT_TIMESTAMP
+     FROM ratings WHERE anime_id = ?
+     ON CONFLICT (anime_id)
+     DO UPDATE SET
+       average = excluded.average,
+       votes = excluded.votes,
+       updated_at = CURRENT_TIMESTAMP`
+  )
+    .bind(animeId, animeId)
+    .run();
+
+  return json({ ok: true, message: 'Rating dihapus' }, ctx.env);
+}
+
+export function mountRatings(router: Router): void {
+  router.get('/api/v1/ratings', listAll);
+  router.get('/api/v1/ratings/:id', getOne);
+  router.post('/api/v1/ratings/:id', postOne);
+  router.delete('/api/v1/ratings/:id', deleteOne);
+}
+===== FILE: src/lib/response.ts =====
+import type { Env } from '../env';
+
+export function corsHeaders(env: Env): Record<string, string> {
+  return {
+    'Access-Control-Allow-Origin': env.ALLOWED_ORIGIN,
+    'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Credentials': 'true',
+    'Access-Control-Max-Age': '86400',
+    Vary: 'Origin',
+  };
+}
+
+export function json(
+  data: unknown,
+  env: Env,
+  status = 200,
+  extra: Record<string, string> = {}
+): Response {
+  return new Response(JSON.stringify(data, null, 2), {
+    status,
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+      ...corsHeaders(env),
+      ...extra,
+    },
+  });
+}
+
+export function error(
+  code: string,
+  message: string,
+  env: Env,
+  status = 400
+): Response {
+  return json({ error: { code, message, status } }, env, status);
+}
+
+===== FILE: src/lib/router.ts =====
+import type { Env } from '../env';
+
+export interface Ctx {
+  request: Request;
+  env: Env;
+  exec: ExecutionContext;
+  url: URL;
+  params: Record<string, string>;
+}
+
+export type Handler = (ctx: Ctx) => Promise<Response> | Response;
+
+interface Route {
+  method: string;
+  pattern: RegExp;
+  keys: string[];
+  handler: Handler;
+}
+
+function compile(path: string): { pattern: RegExp; keys: string[] } {
+  const keys: string[] = [];
+  const source = path.replace(/:([A-Za-z0-9_]+)/g, (_, key: string) => {
+    keys.push(key);
+    return '([^/]+)';
+  });
+  return { pattern: new RegExp(`^${source}$`), keys };
+}
+
+export function createRouter() {
+  const routes: Route[] = [];
+
+  function add(method: string, path: string, handler: Handler): void {
+    const { pattern, keys } = compile(path);
+    routes.push({ method, pattern, keys, handler });
+  }
+
+  return {
+    get: (path: string, handler: Handler) => add('GET', path, handler),
+    post: (path: string, handler: Handler) => add('POST', path, handler),
+    patch: (path: string, handler: Handler) => add('PATCH', path, handler),
+    delete: (path: string, handler: Handler) => add('DELETE', path, handler),
+    options: (path: string, handler: Handler) => add('OPTIONS', path, handler),
+
+    match(
+      method: string,
+      path: string
+    ): { handler: Handler; params: Record<string, string> } | null {
+      for (const route of routes) {
+        if (route.method !== method) continue;
+        const m = path.match(route.pattern);
+        if (!m) continue;
+        const params: Record<string, string> = {};
+        route.keys.forEach((key, i) => {
+          params[key] = decodeURIComponent(m[i + 1] ?? '');
+        });
+        return { handler: route.handler, params };
+      }
+      return null;
+    },
+  };
+}
+
+export type Router = ReturnType<typeof createRouter>;
+
+===== FILE: src/lib/session.ts =====
+import { signJwt, verifyJwt, type JwtPayload } from './jwt';
+
+const COOKIE_NAME = 'qimochi_session';
+const COOKIE_DOMAIN = '.qimochi.web.id';
+const MAX_AGE = 60 * 60 * 24 * 30;
+
+export interface SessionUser {
+  sub: string;
+  email: string;
+  name: string;
+  picture?: string;
+}
+
+export function buildSessionCookie(token: string): string {
+  return [
+    `${COOKIE_NAME}=${token}`,
+    'Path=/',
+    `Domain=${COOKIE_DOMAIN}`,
+    `Max-Age=${MAX_AGE}`,
+    'HttpOnly',
+    'Secure',
+    'SameSite=Lax',
+  ].join('; ');
+}
+
+export function buildClearCookie(): string {
+  return [
+    `${COOKIE_NAME}=`,
+    'Path=/',
+    `Domain=${COOKIE_DOMAIN}`,
+    'Max-Age=0',
+    'HttpOnly',
+    'Secure',
+    'SameSite=Lax',
+  ].join('; ');
+}
+
+function parseCookies(header: string | null): Record<string, string> {
+  if (!header) return {};
+  const out: Record<string, string> = {};
+  for (const part of header.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx === -1) continue;
+    const key = part.slice(0, idx).trim();
+    const value = part.slice(idx + 1).trim();
+    if (key) out[key] = value;
+  }
+  return out;
+}
+
+export function readSessionToken(request: Request): string | null {
+  const cookies = parseCookies(request.headers.get('Cookie'));
+  return cookies[COOKIE_NAME] ?? null;
+}
+
+export async function getSession(
+  request: Request,
+  secret: string
+): Promise<JwtPayload | null> {
+  const token = readSessionToken(request);
+  if (!token) return null;
+  return verifyJwt(token, secret);
+}
+
+export async function createSessionToken(
+  user: SessionUser,
+  secret: string
+): Promise<string> {
+  const now = Math.floor(Date.now() / 1000);
+  return signJwt(
+    {
+      sub: user.sub,
+      email: user.email,
+      name: user.name,
+      picture: user.picture,
+      iat: now,
+      exp: now + MAX_AGE,
+    },
+    secret
+  );
+}
+===== FILE: src/lib/telegram.ts =====
+export interface InlineButton {
+  text: string;
+  callback_data: string;
+}
+
+export interface SendMessageOptions {
+  chatId: string;
+  text: string;
+  inlineKeyboard?: InlineButton[][];
+  parseMode?: 'HTML' | 'MarkdownV2';
+}
+
+export function escapeHtml(input: string): string {
+  return input
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+async function callApi(
+  token: string,
+  method: string,
+  body: Record<string, unknown>
+): Promise<{ ok: boolean; result?: any; description?: string }> {
+  const url = `https://api.telegram.org/bot${token}/${method}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  try {
+    return await res.json();
+  } catch {
+    return { ok: false, description: `HTTP ${res.status}` };
+  }
+}
+
+export async function sendMessage(
+  token: string,
+  opts: SendMessageOptions
+): Promise<{ ok: boolean; messageId?: number; description?: string }> {
+  const body: Record<string, unknown> = {
+    chat_id: opts.chatId,
+    text: opts.text,
+    parse_mode: opts.parseMode ?? 'HTML',
+    disable_web_page_preview: true,
+  };
+  if (opts.inlineKeyboard) {
+    body.reply_markup = { inline_keyboard: opts.inlineKeyboard };
+  }
+  const result = await callApi(token, 'sendMessage', body);
+  if (!result.ok) {
+    return { ok: false, description: result.description ?? 'unknown' };
+  }
+  return { ok: true, messageId: result.result?.message_id };
+}
+
+export async function deleteMessage(
+  token: string,
+  chatId: string,
+  messageId: number
+): Promise<{ ok: boolean }> {
+  const result = await callApi(token, 'deleteMessage', {
+    chat_id: chatId,
+    message_id: messageId,
+  });
+  return { ok: result.ok };
+}
+
+export async function editMessageText(
+  token: string,
+  chatId: string,
+  messageId: number,
+  text: string,
+  parseMode: 'HTML' | 'MarkdownV2' = 'HTML'
+): Promise<{ ok: boolean }> {
+  const result = await callApi(token, 'editMessageText', {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    parse_mode: parseMode,
+    disable_web_page_preview: true,
+    reply_markup: { inline_keyboard: [] },
+  });
+  return { ok: result.ok };
+}
+
+export async function answerCallbackQuery(
+  token: string,
+  callbackQueryId: string,
+  text?: string
+): Promise<{ ok: boolean }> {
+  const result = await callApi(token, 'answerCallbackQuery', {
+    callback_query_id: callbackQueryId,
+    text: text ?? '',
+    show_alert: false,
+  });
+  return { ok: result.ok };
+}
+
+export function buildCommentMessage(input: {
+  id: string;
+  slug: string;
+  body: string;
+  userName: string;
+  userEmail: string;
+}): string {
+  const bodyPreview =
+    input.body.length > 500 ? input.body.slice(0, 500) + '…' : input.body;
+  return [
+    `<b>📩 Komentar baru</b>`,
+    ``,
+    `<b>Slug:</b> <code>${escapeHtml(input.slug)}</code>`,
+    `<b>Dari:</b> ${escapeHtml(input.userName)} &lt;${escapeHtml(input.userEmail)}&gt;`,
+    ``,
+    `<b>Isi:</b>`,
+    escapeHtml(bodyPreview),
+    ``,
+    `<i>ID: ${input.id}</i>`,
+  ].join('\n');
+}
+
+export function buildModeratedMessage(
+  originalText: string,
+  action: 'approved' | 'rejected',
+  moderator: string
+): string {
+  const icon = action === 'approved' ? '✅' : '❌';
+  const label = action === 'approved' ? 'Disetujui' : 'Ditolak';
+  return `${originalText}\n\n${icon} <b>${label}</b> oleh ${escapeHtml(moderator)}`;
+}
+
+===== FILE: src/lib/turnstile.ts =====
+interface TurnstileVerifyResponse {
+  success: boolean;
+  'error-codes'?: string[];
+  challenge_ts?: string;
+  hostname?: string;
+}
+
+const VERIFY_URL =
+  'https://challenges.cloudflare.com/turnstile/v0/siteverify';
+
+export async function verifyTurnstile(
+  token: string,
+  secret: string,
+  remoteIp?: string
+): Promise<boolean> {
+  if (!token) return false;
+
+  const form = new FormData();
+  form.append('secret', secret);
+  form.append('response', token);
+  if (remoteIp) form.append('remoteip', remoteIp);
+
+  let res: Response;
+  try {
+    res = await fetch(VERIFY_URL, { method: 'POST', body: form });
+  } catch {
+    return false;
+  }
+
+  if (!res.ok) return false;
+
+  let data: TurnstileVerifyResponse;
+  try {
+    data = (await res.json()) as TurnstileVerifyResponse;
+  } catch {
+    return false;
+  }
+
+  return data.success === true;
+}
+===== FILE: src/routes/auth.ts =====
+import type { Ctx, Router } from '../lib/router';
+import { json, error } from '../lib/response';
+import { verifyGoogleIdToken } from '../lib/google';
+import {
+  buildSessionCookie,
+  buildClearCookie,
+  createSessionToken,
+  getSession,
+} from '../lib/session';
+
+async function googleLogin(ctx: Ctx): Promise<Response> {
+  let body: { credential?: string };
+  try {
+    body = (await ctx.request.json()) as { credential?: string };
+  } catch {
+    return error('INVALID_JSON', 'Body bukan JSON valid', ctx.env, 400);
+  }
+
+  const credential = body.credential;
+  if (!credential || typeof credential !== 'string') {
+    return error('MISSING_CREDENTIAL', 'Credential wajib diisi', ctx.env, 400);
+  }
+
+  const clientId = ctx.env.GOOGLE_CLIENT_ID;
+  if (!clientId) {
+    return error('SERVER_MISCONFIGURED', 'GOOGLE_CLIENT_ID belum diset', ctx.env, 500);
+  }
+
+  const googleUser = await verifyGoogleIdToken(credential, clientId);
+  if (!googleUser) {
+    return error('INVALID_CREDENTIAL', 'Token Google tidak valid', ctx.env, 401);
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  await ctx.env.DB.prepare(
+    `INSERT INTO users (id, email, name, picture, created_at, last_seen_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT (id) DO UPDATE SET
+       email = excluded.email,
+       name = excluded.name,
+       picture = excluded.picture,
+       last_seen_at = excluded.last_seen_at`
+  )
+    .bind(
+      googleUser.sub,
+      googleUser.email,
+      googleUser.name,
+      googleUser.picture ?? null,
+      now,
+      now
+    )
+    .run();
+
+  const token = await createSessionToken(
+    {
+      sub: googleUser.sub,
+      email: googleUser.email,
+      name: googleUser.name,
+      picture: googleUser.picture,
+    },
+    ctx.env.SESSION_SECRET
+  );
+
+  return json(
+    {
+      ok: true,
+      user: {
+        sub: googleUser.sub,
+        email: googleUser.email,
+        name: googleUser.name,
+        picture: googleUser.picture ?? null,
+      },
+    },
+    ctx.env,
+    200,
+    { 'Set-Cookie': buildSessionCookie(token) }
+  );
+}
+
+async function me(ctx: Ctx): Promise<Response> {
+  const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
+  if (!session) {
+    return json({ ok: false, user: null }, ctx.env);
+  }
+  return json(
+    {
+      ok: true,
+      user: {
+        sub: session.sub,
+        email: session.email,
+        name: session.name,
+        picture: session.picture ?? null,
+      },
+    },
+    ctx.env
+  );
+}
+
+async function logout(ctx: Ctx): Promise<Response> {
+  return json({ ok: true }, ctx.env, 200, {
+    'Set-Cookie': buildClearCookie(),
+  });
+}
+
+export function mountAuth(router: Router): void {
+  router.post('/api/v1/auth/google', googleLogin);
+  router.get('/api/v1/auth/me', me);
+  router.post('/api/v1/auth/logout', logout);
+}
+===== FILE: src/routes/bookmarks.ts =====
+import type { Ctx, Router } from '../lib/router';
+import { json, error } from '../lib/response';
+import { getSession } from '../lib/session';
+
+interface BookmarkRow {
+  anime_id: string;
+  created_at: number;
+}
+
+async function listAll(ctx: Ctx): Promise<Response> {
+  const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
+  if (!session) {
+    return error('UNAUTHORIZED', 'Login dulu', ctx.env, 401);
+  }
+
+  const { results } = await ctx.env.DB.prepare(
+    `SELECT anime_id, created_at
+       FROM bookmarks
+      WHERE user_id = ?
+      ORDER BY created_at DESC`
+  )
+    .bind(session.sub)
+    .all<BookmarkRow>();
+
+  const data = (results ?? []).map((r) => ({
+    animeId: r.anime_id,
+    createdAt: r.created_at,
+  }));
+
+  return json({ data, total: data.length }, ctx.env, 200, {
+    'Cache-Control': 'no-store',
+  });
+}
+
+async function getOne(ctx: Ctx): Promise<Response> {
+  const animeId = ctx.params.id!;
+  if (!animeId) {
+    return error('MISSING_ID', 'ID anime wajib diisi', ctx.env, 400);
+  }
+
+  const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
+
+  if (!session) {
+    return json(
+      { data: { animeId, bookmarked: false } },
+      ctx.env,
+      200,
+      { 'Cache-Control': 'no-store' }
+    );
+  }
+
+  const row = await ctx.env.DB.prepare(
+    `SELECT 1 FROM bookmarks WHERE user_id = ? AND anime_id = ?`
+  )
+    .bind(session.sub, animeId)
+    .first<{ 1: number }>();
+
+  return json(
+    { data: { animeId, bookmarked: row !== null } },
+    ctx.env,
+    200,
+    { 'Cache-Control': 'no-store' }
+  );
+}
+
+async function addOne(ctx: Ctx): Promise<Response> {
+  const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
+  if (!session) {
+    return error('UNAUTHORIZED', 'Login dulu untuk menyimpan', ctx.env, 401);
+  }
+
+  const animeId = ctx.params.id!;
+  if (!animeId) {
+    return error('MISSING_ID', 'ID anime wajib diisi', ctx.env, 400);
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+
+  await ctx.env.DB.prepare(
+    `INSERT INTO bookmarks (user_id, anime_id, created_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT (user_id, anime_id) DO NOTHING`
+  )
+    .bind(session.sub, animeId, now)
+    .run();
+
+  return json(
+    { ok: true, data: { animeId, bookmarked: true } },
+    ctx.env
+  );
+}
+
+async function removeOne(ctx: Ctx): Promise<Response> {
+  const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
+  if (!session) {
+    return error('UNAUTHORIZED', 'Login dulu', ctx.env, 401);
+  }
+
+  const animeId = ctx.params.id!;
+  if (!animeId) {
+    return error('MISSING_ID', 'ID anime wajib diisi', ctx.env, 400);
+  }
+
+  await ctx.env.DB.prepare(
+    `DELETE FROM bookmarks WHERE user_id = ? AND anime_id = ?`
+  )
+    .bind(session.sub, animeId)
+    .run();
+
+  return json(
+    { ok: true, data: { animeId, bookmarked: false } },
+    ctx.env
+  );
+}
+
+export function mountBookmarks(router: Router): void {
+  router.get('/api/v1/bookmarks', listAll);
+  router.get('/api/v1/bookmarks/:id', getOne);
+  router.post('/api/v1/bookmarks/:id', addOne);
+  router.delete('/api/v1/bookmarks/:id', removeOne);
+}
+===== FILE: src/routes/bot.ts =====
+import type { Ctx, Router } from '../lib/router';
+import { json, error } from '../lib/response';
+import { requireBot } from '../lib/botauth';
+
+interface PendingRow {
+  id: string;
+  slug: string;
+  user_id: string;
+  parent_id: string | null;
+  body: string;
+  created_at: number;
+  name: string;
+  email: string;
+}
+
+async function purgeCacheForSlug(slug: string): Promise<void> {
+  try {
+    const url = new URL('https://api.qimochi.web.id/api/v1/comments');
+    url.searchParams.set('slug', slug);
+    await caches.default.delete(url.toString());
+  } catch {
+    // ignore
+  }
+}
+
+async function guard(ctx: Ctx): Promise<Response | null> {
+  const ok = await requireBot(ctx.request, ctx.env.BOT_SECRET);
+  if (!ok) {
+    return error('UNAUTHORIZED', 'Bot secret tidak valid', ctx.env, 401);
+  }
+  return null;
+}
+
+async function pending(ctx: Ctx): Promise<Response> {
+  const blocked = await guard(ctx);
+  if (blocked) return blocked;
+
+  const limit = Math.min(
+    Math.max(parseInt(ctx.url.searchParams.get('limit') ?? '50', 10) || 50, 1),
+    200
+  );
+
+  const { results } = await ctx.env.DB.prepare(
+    `SELECT c.id, c.slug, c.user_id, c.parent_id, c.body, c.created_at,
+            u.name, u.email
+       FROM comments c
+       JOIN users u ON u.id = c.user_id
+      WHERE c.status = 'pending'
+      ORDER BY c.created_at ASC
+      LIMIT ?`
+  )
+    .bind(limit)
+    .all<PendingRow>();
+
+  const data = (results ?? []).map((row) => ({
+    id: row.id,
+    slug: row.slug,
+    parentId: row.parent_id,
+    body: row.body,
+    createdAt: row.created_at,
+    user: { sub: row.user_id, name: row.name, email: row.email },
+  }));
+
+  return json({ data, total: data.length }, ctx.env);
+}
+
+interface ModerateBody {
+  reason?: string;
+  score?: number;
+  moderator?: string;
+}
+
+async function parseModerateBody(ctx: Ctx): Promise<ModerateBody> {
+  try {
+    return (await ctx.request.json()) as ModerateBody;
+  } catch {
+    return {};
+  }
+}
+
+async function approve(ctx: Ctx): Promise<Response> {
+  const blocked = await guard(ctx);
+  if (blocked) return blocked;
+
+  const id = ctx.params.id!;
+  const body = await parseModerateBody(ctx);
+  const now = Math.floor(Date.now() / 1000);
+
+  const row = await ctx.env.DB.prepare(
+    `SELECT id, slug, status FROM comments WHERE id = ?`
+  )
+    .bind(id)
+    .first<{ id: string; slug: string; status: string }>();
+
+  if (!row) return error('NOT_FOUND', 'Komentar tidak ditemukan', ctx.env, 404);
+  if (row.status === 'approved') {
+    return json({ ok: true, already: true }, ctx.env);
+  }
+
+  await ctx.env.DB.prepare(
+    `UPDATE comments
+        SET status = 'approved',
+            approved_at = ?,
+            moderated_by = ?,
+            score = ?,
+            reason = ?
+      WHERE id = ?`
+  )
+    .bind(
+      now,
+      body.moderator ?? 'bot',
+      typeof body.score === 'number' ? body.score : null,
+      body.reason ?? null,
+      id
+    )
+    .run();
+
+  ctx.exec.waitUntil(purgeCacheForSlug(row.slug));
+
+  return json({ ok: true, id, slug: row.slug, status: 'approved' }, ctx.env);
+}
+
+async function reject(ctx: Ctx): Promise<Response> {
+  const blocked = await guard(ctx);
+  if (blocked) return blocked;
+
+  const id = ctx.params.id!;
+  const body = await parseModerateBody(ctx);
+
+  const row = await ctx.env.DB.prepare(
+    `SELECT id, slug, status FROM comments WHERE id = ?`
+  )
+    .bind(id)
+    .first<{ id: string; slug: string; status: string }>();
+
+  if (!row) return error('NOT_FOUND', 'Komentar tidak ditemukan', ctx.env, 404);
+  if (row.status === 'rejected') {
+    return json({ ok: true, already: true }, ctx.env);
+  }
+
+  await ctx.env.DB.prepare(
+    `UPDATE comments
+        SET status = 'rejected',
+            moderated_by = ?,
+            score = ?,
+            reason = ?
+      WHERE id = ?`
+  )
+    .bind(
+      body.moderator ?? 'bot',
+      typeof body.score === 'number' ? body.score : null,
+      body.reason ?? null,
+      id
+    )
+    .run();
+
+  return json(
+    { ok: true, id, slug: row.slug, status: 'rejected' },
+    ctx.env
+  );
+}
+
+export function mountBot(router: Router): void {
+  router.get('/api/v1/bot/pending', pending);
+  router.post('/api/v1/bot/comments/:id/approve', approve);
+  router.post('/api/v1/bot/comments/:id/reject', reject);
+}
+===== FILE: src/routes/comments.ts =====
+import type { Ctx, Router } from '../lib/router';
+import { json, error } from '../lib/response';
+import { getSession } from '../lib/session';
+import { verifyTurnstile } from '../lib/turnstile';
+import { checkRateLimit, getClientIp, hashKey } from '../lib/ratelimit';
+import { notifyTelegram, notifyAutoRejected } from './telegram';
+import { moderate } from '../lib/moderation';
+import { sendMessage, escapeHtml } from '../lib/telegram';
+
+const MAX_BODY_LEN = 2000;
+const MIN_BODY_LEN = 2;
+const EDIT_WINDOW_SEC = 900;
+
+interface CommentRow {
+  id: string;
+  slug: string;
+  user_id: string;
+  parent_id: string | null;
+  body: string;
+  status: string;
+  created_at: number;
+  edited_at: number | null;
+  name: string;
+  email: string;
+  picture: string | null;
+  likes: number;
+  is_liked: number;
+}
+
+interface PublicComment {
+  id: string;
+  slug: string;
+  parentId: string | null;
+  body: string;
+  status: string;
+  createdAt: number;
+  editedAt: number | null;
+  likes: number;
+  isLiked: boolean;
+  isOwn: boolean;
+  isAdmin: boolean;
+  canEdit: boolean;
+  user: {
+    sub: string;
+    name: string;
+    picture: string | null;
+  };
+}
+
+function slugify(input: string): string {
+  return input.trim().toLowerCase();
+}
+
+function sanitizeBody(input: string): string {
+  return input.replace(/\r\n/g, '\n').trim();
+}
+
+function newId(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function adminSet(env: Ctx['env']): Set<string> {
+  return new Set(
+    (env.ADMIN_EMAILS ?? '')
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean)
+  );
+}
+
+function toPublic(
+  row: CommentRow,
+  viewerSub: string | null,
+  admins: Set<string>
+): PublicComment {
+  const now = Math.floor(Date.now() / 1000);
+  const isOwn = viewerSub !== null && viewerSub === row.user_id;
+  const withinEdit =
+    row.status !== 'rejected' && now - row.created_at < EDIT_WINDOW_SEC;
+
+  return {
+    id: row.id,
+    slug: row.slug,
+    parentId: row.parent_id,
+    body: row.body,
+    status: row.status,
+    createdAt: row.created_at,
+    editedAt: row.edited_at,
+    likes: row.likes,
+    isLiked: row.is_liked === 1,
+    isOwn,
+    isAdmin: admins.has((row.email ?? '').toLowerCase()),
+    canEdit: isOwn && withinEdit,
+    user: {
+      sub: row.user_id,
+      name: row.name,
+      picture: row.picture,
+    },
+  };
+}
+
+async function listComments(ctx: Ctx): Promise<Response> {
+  const slug = slugify(ctx.url.searchParams.get('slug') ?? '');
+  if (!slug) {
+    return error('MISSING_SLUG', 'Query slug wajib diisi', ctx.env, 400);
+  }
+
+  const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
+  const viewerSub = session?.sub ?? null;
+  const admins = adminSet(ctx.env);
+
+  const baseSelect = `
+    SELECT c.id, c.slug, c.user_id, c.parent_id, c.body, c.status,
+           c.created_at, c.edited_at, u.name, u.email, u.picture,
+           COALESCE(l.cnt, 0) as likes,
+           CASE WHEN ul.user_id IS NULL THEN 0 ELSE 1 END as is_liked
+      FROM comments c
+      JOIN users u ON u.id = c.user_id
+      LEFT JOIN (
+        SELECT comment_id, COUNT(*) as cnt
+          FROM comment_likes
+         GROUP BY comment_id
+      ) l ON l.comment_id = c.id
+      LEFT JOIN comment_likes ul
+        ON ul.comment_id = c.id AND ul.user_id = ?
+  `;
+
+  let rows: CommentRow[] = [];
+
+  if (viewerSub) {
+    const res = await ctx.env.DB.prepare(
+      `${baseSelect}
+        WHERE c.slug = ? AND (
+          c.status = 'approved'
+          OR (c.user_id = ? AND c.status IN ('pending', 'rejected'))
+        )
+        ORDER BY c.created_at ASC
+        LIMIT 500`
+    )
+      .bind(viewerSub, slug, viewerSub)
+      .all<CommentRow>();
+    rows = res.results ?? [];
+  } else {
+    const res = await ctx.env.DB.prepare(
+      `${baseSelect}
+        WHERE c.slug = ? AND c.status = 'approved'
+        ORDER BY c.created_at ASC
+        LIMIT 500`
+    )
+      .bind('', slug)
+      .all<CommentRow>();
+    rows = res.results ?? [];
+  }
+
+  const data = rows.map((r) => toPublic(r, viewerSub, admins));
+
+  return json({ data, total: data.length }, ctx.env, 200, {
+    'Cache-Control': 'no-store',
+  });
+}
+
+async function createComment(ctx: Ctx): Promise<Response> {
+  const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
+  if (!session) {
+    return error('UNAUTHORIZED', 'Login dulu untuk berkomentar', ctx.env, 401);
+  }
+
+  let body: {
+    slug?: string;
+    body?: string;
+    parentId?: string | null;
+    turnstileToken?: string;
+  };
+  try {
+    body = (await ctx.request.json()) as typeof body;
+  } catch {
+    return error('INVALID_JSON', 'Body bukan JSON valid', ctx.env, 400);
+  }
+
+  const slug = slugify(body.slug ?? '');
+  if (!slug) return error('MISSING_SLUG', 'Slug wajib diisi', ctx.env, 400);
+
+  const rawText = typeof body.body === 'string' ? body.body : '';
+  const text = sanitizeBody(rawText);
+  if (text.length < MIN_BODY_LEN) {
+    return error('BODY_TOO_SHORT', 'Komentar terlalu pendek', ctx.env, 400);
+  }
+  if (text.length > MAX_BODY_LEN) {
+    return error('BODY_TOO_LONG', `Maksimal ${MAX_BODY_LEN} karakter`, ctx.env, 400);
+  }
+
+  const turnstileToken =
+    typeof body.turnstileToken === 'string' ? body.turnstileToken : '';
+  const ip = getClientIp(ctx.request);
+  const okTurnstile = await verifyTurnstile(
+    turnstileToken,
+    ctx.env.TURNSTILE_SECRET,
+    ip
+  );
+  if (!okTurnstile) {
+    return error('TURNSTILE_FAILED', 'Verifikasi captcha gagal', ctx.env, 403);
+  }
+
+  const userKey = await hashKey(`comment:user:${session.sub}`);
+  const minuteLimit = await checkRateLimit(ctx.env.DB, `${userKey}:m`, 5, 60);
+  if (!minuteLimit.ok) {
+    return json(
+      {
+        error: {
+          code: 'RATE_LIMITED',
+          message: 'Terlalu cepat, tunggu sebentar',
+          status: 429,
+        },
+      },
+      ctx.env,
+      429,
+      { 'Retry-After': String(minuteLimit.retryAfter) }
+    );
+  }
+  const hourLimit = await checkRateLimit(ctx.env.DB, `${userKey}:h`, 20, 3600);
+  if (!hourLimit.ok) {
+    return json(
+      {
+        error: {
+          code: 'RATE_LIMITED',
+          message: 'Batas per jam tercapai',
+          status: 429,
+        },
+      },
+      ctx.env,
+      429,
+      { 'Retry-After': String(hourLimit.retryAfter) }
+    );
+  }
+
+  const moderation = moderate(text, ctx.env);
+
+  if (moderation.decision === 'rejected') {
+    ctx.exec.waitUntil(
+      notifyAutoRejected(ctx.env, {
+        slug,
+        body: text,
+        userName: session.name,
+        userEmail: session.email,
+        reason: moderation.reason,
+        matched: moderation.matched,
+      }).catch((err) =>
+        console.error('[telegram] auto-rejected notify failed', err)
+      )
+    );
+
+    return json(
+      {
+        ok: false,
+        error: {
+          code: 'COMMENT_REJECTED',
+          message:
+            'Komentar kamu mengandung kata yang tidak diizinkan. Mohon periksa kembali sebelum mengirim.',
+          status: 400,
+        },
+      },
+      ctx.env,
+      400
+    );
+  }
+
+  let parentId: string | null = null;
+  if (body.parentId && typeof body.parentId === 'string') {
+    const parent = await ctx.env.DB.prepare(
+      `SELECT id, parent_id FROM comments WHERE id = ? AND slug = ? AND status = 'approved'`
+    )
+      .bind(body.parentId, slug)
+      .first<{ id: string; parent_id: string | null }>();
+
+    if (!parent) {
+      return error('PARENT_NOT_FOUND', 'Komentar induk tidak ditemukan', ctx.env, 400);
+    }
+    if (parent.parent_id !== null) {
+      return error('NESTING_TOO_DEEP', 'Balasan hanya boleh 1 level', ctx.env, 400);
+    }
+    parentId = parent.id;
+  }
+
+  const status = moderation.decision;
+  const isApproved = status === 'approved';
+
+  const id = newId();
+  const now = Math.floor(Date.now() / 1000);
+  const admins = adminSet(ctx.env);
+
+  await ctx.env.DB.prepare(
+    `INSERT INTO comments
+       (id, slug, user_id, parent_id, body, status, created_at,
+        approved_at, moderated_by, reason)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  )
+    .bind(
+      id,
+      slug,
+      session.sub,
+      parentId,
+      text,
+      status,
+      now,
+      isApproved ? now : null,
+      isApproved ? 'bot:auto' : null,
+      moderation.reason || null
+    )
+    .run();
+
+  if (status === 'pending') {
+    ctx.exec.waitUntil(
+      notifyTelegram(ctx.env, {
+        id,
+        slug,
+        body: text,
+        userName: session.name,
+        userEmail: session.email,
+      }).catch((err) => console.error('[telegram] notify failed', err))
+    );
+  }
+
+  return json(
+    {
+      ok: true,
+      status,
+      reason: moderation.reason || null,
+      data: {
+        id,
+        slug,
+        parentId,
+        body: text,
+        status,
+        createdAt: now,
+        editedAt: null,
+        likes: 0,
+        isLiked: false,
+        isOwn: true,
+        isAdmin: admins.has(session.email.toLowerCase()),
+        canEdit: true,
+        user: {
+          sub: session.sub,
+          name: session.name,
+          picture: session.picture ?? null,
+        },
+      },
+    },
+    ctx.env,
+    201
+  );
+}
+
+async function deleteComment(ctx: Ctx): Promise<Response> {
+  const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
+  if (!session) return error('UNAUTHORIZED', 'Login dulu', ctx.env, 401);
+
+  const id = ctx.params.id!;
+  if (!id) return error('MISSING_ID', 'ID komentar wajib diisi', ctx.env, 400);
+
+  const row = await ctx.env.DB.prepare(
+    `SELECT id, slug, user_id, parent_id FROM comments WHERE id = ?`
+  )
+    .bind(id)
+    .first<{
+      id: string;
+      slug: string;
+      user_id: string;
+      parent_id: string | null;
+    }>();
+
+  if (!row) return error('NOT_FOUND', 'Komentar tidak ditemukan', ctx.env, 404);
+
+  const admins = adminSet(ctx.env);
+  const isAdmin = admins.has(session.email.toLowerCase());
+  if (row.user_id !== session.sub && !isAdmin) {
+    return error('FORBIDDEN', 'Bukan komentar kamu', ctx.env, 403);
+  }
+
+  await ctx.env.DB.prepare(`DELETE FROM comments WHERE id = ?`).bind(id).run();
+  await ctx.env.DB.prepare(`DELETE FROM comment_likes WHERE comment_id = ?`)
+    .bind(id)
+    .run();
+
+  if (row.parent_id === null) {
+    const childIds = await ctx.env.DB.prepare(
+      `SELECT id FROM comments WHERE parent_id = ?`
+    )
+      .bind(id)
+      .all<{ id: string }>();
+
+    for (const c of childIds.results ?? []) {
+      await ctx.env.DB.prepare(`DELETE FROM comment_likes WHERE comment_id = ?`)
+        .bind(c.id)
+        .run();
+    }
+
+    await ctx.env.DB.prepare(`DELETE FROM comments WHERE parent_id = ?`)
+      .bind(id)
+      .run();
+  }
+
+  return json({ ok: true, id }, ctx.env);
+}
+
+async function editComment(ctx: Ctx): Promise<Response> {
+  const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
+  if (!session) return error('UNAUTHORIZED', 'Login dulu', ctx.env, 401);
+
+  const id = ctx.params.id!;
+  if (!id) return error('MISSING_ID', 'ID komentar wajib diisi', ctx.env, 400);
+
+  let body: { body?: string };
+  try {
+    body = (await ctx.request.json()) as { body?: string };
+  } catch {
+    return error('INVALID_JSON', 'Body bukan JSON valid', ctx.env, 400);
+  }
+
+  const text = sanitizeBody(typeof body.body === 'string' ? body.body : '');
+  if (text.length < MIN_BODY_LEN) {
+    return error('BODY_TOO_SHORT', 'Komentar terlalu pendek', ctx.env, 400);
+  }
+  if (text.length > MAX_BODY_LEN) {
+    return error('BODY_TOO_LONG', `Maksimal ${MAX_BODY_LEN} karakter`, ctx.env, 400);
+  }
+
+  const row = await ctx.env.DB.prepare(
+    `SELECT id, user_id, created_at, status FROM comments WHERE id = ?`
+  )
+    .bind(id)
+    .first<{
+      id: string;
+      user_id: string;
+      created_at: number;
+      status: string;
+    }>();
+
+  if (!row) return error('NOT_FOUND', 'Komentar tidak ditemukan', ctx.env, 404);
+
+  const admins = adminSet(ctx.env);
+  const isAdmin = admins.has(session.email.toLowerCase());
+  if (row.user_id !== session.sub && !isAdmin) {
+    return error('FORBIDDEN', 'Bukan komentar kamu', ctx.env, 403);
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  if (now - row.created_at > EDIT_WINDOW_SEC && !isAdmin) {
+    return error('EDIT_EXPIRED', 'Batas waktu edit sudah lewat', ctx.env, 400);
+  }
+
+  const moderation = moderate(text, ctx.env);
+
+  if (moderation.decision === 'rejected') {
+    return json(
+      {
+        ok: false,
+        error: {
+          code: 'COMMENT_REJECTED',
+          message:
+            'Hasil edit mengandung kata yang tidak diizinkan. Mohon periksa kembali.',
+          status: 400,
+        },
+      },
+      ctx.env,
+      400
+    );
+  }
+
+  const status = moderation.decision;
+  const isApproved = status === 'approved';
+
+  await ctx.env.DB.prepare(
+    `UPDATE comments
+        SET body = ?,
+            edited_at = ?,
+            status = ?,
+            approved_at = ?,
+            moderated_by = ?,
+            reason = ?
+      WHERE id = ?`
+  )
+    .bind(
+      text,
+      now,
+      status,
+      isApproved ? now : null,
+      isApproved ? 'bot:auto' : null,
+      moderation.reason || null,
+      id
+    )
+    .run();
+
+  return json(
+    { ok: true, id, editedAt: now, status, reason: moderation.reason || null },
+    ctx.env
+  );
+}
+
+async function toggleLike(ctx: Ctx): Promise<Response> {
+  const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
+  if (!session) return error('UNAUTHORIZED', 'Login dulu', ctx.env, 401);
+
+  const id = ctx.params.id!;
+  if (!id) return error('MISSING_ID', 'ID komentar wajib diisi', ctx.env, 400);
+
+  const row = await ctx.env.DB.prepare(
+    `SELECT id, status FROM comments WHERE id = ?`
+  )
+    .bind(id)
+    .first<{ id: string; status: string }>();
+
+  if (!row || row.status !== 'approved') {
+    return error('NOT_FOUND', 'Komentar tidak ditemukan', ctx.env, 404);
+  }
+
+  const key = await hashKey(`like:${session.sub}`);
+  const limit = await checkRateLimit(ctx.env.DB, `${key}:m`, 30, 60);
+  if (!limit.ok) return error('RATE_LIMITED', 'Terlalu cepat', ctx.env, 429);
+
+  const existing = await ctx.env.DB.prepare(
+    `SELECT 1 FROM comment_likes WHERE comment_id = ? AND user_id = ?`
+  )
+    .bind(id, session.sub)
+    .first<{ 1: number }>();
+
+  let liked: boolean;
+  const now = Math.floor(Date.now() / 1000);
+
+  if (existing) {
+    await ctx.env.DB.prepare(
+      `DELETE FROM comment_likes WHERE comment_id = ? AND user_id = ?`
+    )
+      .bind(id, session.sub)
+      .run();
+    liked = false;
+  } else {
+    await ctx.env.DB.prepare(
+      `INSERT INTO comment_likes (comment_id, user_id, created_at)
+       VALUES (?, ?, ?)`
+    )
+      .bind(id, session.sub, now)
+      .run();
+    liked = true;
+  }
+
+  const total = await ctx.env.DB.prepare(
+    `SELECT COUNT(*) as c FROM comment_likes WHERE comment_id = ?`
+  )
+    .bind(id)
+    .first<{ c: number }>();
+
+  return json({ ok: true, id, liked, likes: total?.c ?? 0 }, ctx.env);
+}
+
+async function reportComment(ctx: Ctx): Promise<Response> {
+  const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
+  if (!session) return error('UNAUTHORIZED', 'Login dulu', ctx.env, 401);
+
+  const id = ctx.params.id!;
+  if (!id) return error('MISSING_ID', 'ID komentar wajib diisi', ctx.env, 400);
+
+  let body: { reason?: string };
+  try {
+    body = (await ctx.request.json()) as { reason?: string };
+  } catch {
+    body = {};
+  }
+
+  const reason = (body.reason ?? '').trim().slice(0, 500);
+
+  const row = await ctx.env.DB.prepare(
+    `SELECT c.id, c.slug, c.body, c.user_id, u.name
+       FROM comments c
+       JOIN users u ON u.id = c.user_id
+      WHERE c.id = ?`
+  )
+    .bind(id)
+    .first<{
+      id: string;
+      slug: string;
+      body: string;
+      user_id: string;
+      name: string;
+    }>();
+
+  if (!row) return error('NOT_FOUND', 'Komentar tidak ditemukan', ctx.env, 404);
+
+  const key = await hashKey(`report:${session.sub}`);
+  const limit = await checkRateLimit(ctx.env.DB, `${key}:h`, 10, 3600);
+  if (!limit.ok) return error('RATE_LIMITED', 'Batas report tercapai', ctx.env, 429);
+
+  const now = Math.floor(Date.now() / 1000);
+  const reportId = newId();
+
+  await ctx.env.DB.prepare(
+    `INSERT INTO comment_reports (id, comment_id, user_id, reason, created_at, status)
+     VALUES (?, ?, ?, ?, ?, 'open')`
+  )
+    .bind(reportId, id, session.sub, reason || null, now)
+    .run();
+
+  const token = ctx.env.TELEGRAM_BOT_TOKEN;
+  const chatId = ctx.env.TELEGRAM_CHAT_ID;
+  if (token && chatId) {
+    const preview =
+      row.body.length > 300 ? row.body.slice(0, 300) + '…' : row.body;
+    const text = [
+      `<b>🚨 Komentar dilaporkan</b>`,
+      ``,
+      `<b>Slug:</b> <code>${escapeHtml(row.slug)}</code>`,
+      `<b>Penulis:</b> ${escapeHtml(row.name)}`,
+      `<b>Pelapor:</b> ${escapeHtml(session.name)}`,
+      `<b>Alasan:</b> ${escapeHtml(reason || '(tidak disebutkan)')}`,
+      ``,
+      `<b>Isi:</b>`,
+      escapeHtml(preview),
+      ``,
+      `<i>ID: ${id}</i>`,
+    ].join('\n');
+
+    ctx.exec.waitUntil(
+      sendMessage(token, {
+        chatId,
+        text,
+        inlineKeyboard: [
+          [{ text: '❌ Reject', callback_data: `reject:${id}` }],
+          [
+            {
+              text: '🔗 Buka halaman',
+              url: `https://qimochi.web.id/anime/${encodeURIComponent(row.slug)}/`,
+            },
+          ],
+        ],
+      }).catch((err) => console.error('[telegram] report notify failed', err))
+    );
+  }
+
+  return json({ ok: true, id: reportId }, ctx.env);
+}
+
+export function mountComments(router: Router): void {
+  router.get('/api/v1/comments', listComments);
+  router.post('/api/v1/comments', createComment);
+  router.patch('/api/v1/comments/:id', editComment);
+  router.delete('/api/v1/comments/:id', deleteComment);
+  router.post('/api/v1/comments/:id/like', toggleLike);
+  router.post('/api/v1/comments/:id/report', reportComment);
+}
+
+===== FILE: src/routes/probe.ts =====
+import type { Ctx, Router } from '../lib/router';
+import { json, error } from '../lib/response';
+import { checkRateLimit, getClientIp, hashKey } from '../lib/ratelimit';
+
+const FETCH_TIMEOUT_MS = 6000;
+const ALLOWED_PROTOCOLS = ['http:', 'https:'];
+
+function isValidUrl(raw: string | null): string | null {
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    if (!ALLOWED_PROTOCOLS.includes(u.protocol)) return null;
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
+
+async function probe(ctx: Ctx): Promise<Response> {
+  const target = isValidUrl(ctx.url.searchParams.get('url'));
+  if (!target) {
+    return error('INVALID_URL', 'URL tidak valid', ctx.env, 400);
+  }
+
+  const ip = getClientIp(ctx.request);
+  const key = await hashKey(`probe:${ip}`);
+  const limit = await checkRateLimit(ctx.env.DB, `${key}:m`, 60, 60);
+  if (!limit.ok) {
+    return json(
+      {
+        error: {
+          code: 'RATE_LIMITED',
+          message: 'Terlalu banyak permintaan',
+          status: 429,
+        },
+      },
+      ctx.env,
+      429,
+      { 'Retry-After': String(limit.retryAfter) }
+    );
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
+  const t0 = Date.now();
+
+  try {
+    const res = await fetch(target, {
+      method: 'HEAD',
+      redirect: 'follow',
+      signal: controller.signal,
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+        Accept: '*/*',
+      },
+    });
+    clearTimeout(timeoutId);
+
+    return json(
+      {
+        ok: res.status >= 200 && res.status < 400,
+        status: res.status,
+        statusText: res.statusText,
+        contentType: res.headers.get('content-type') ?? '',
+        finalUrl: res.url || target,
+        elapsed: Date.now() - t0,
+      },
+      ctx.env,
+      200,
+      { 'Cache-Control': 'no-store' }
+    );
+  } catch (err) {
+    clearTimeout(timeoutId);
+
+    const isAbort = err instanceof Error && err.name === 'AbortError';
+    return json(
+      {
+        ok: false,
+        status: 0,
+        statusText: isAbort ? 'timeout' : 'network-error',
+        contentType: '',
+        finalUrl: target,
+        elapsed: Date.now() - t0,
+      },
+      ctx.env,
+      200,
+      { 'Cache-Control': 'no-store' }
+    );
+  }
+}
+
+export function mountProbe(router: Router): void {
+  router.get('/api/v1/probe', probe);
+}
+===== FILE: src/routes/ratings.ts =====
+import type { Ctx, Router } from '../lib/router';
+import { json, error } from '../lib/response';
+import { getSession } from '../lib/session';
+
+interface RatingRow {
+  anime_id: string;
+  average: number;
+  votes: number;
+}
+
+async function getUserRating(
+  ctx: Ctx,
+  animeId: string,
+  userId: string
+): Promise<number | null> {
+  const row = await ctx.env.DB.prepare(
+    `SELECT score FROM ratings WHERE anime_id = ? AND user_id = ?`
+  )
+    .bind(animeId, userId)
+    .first<{ score: number }>();
+  return row?.score ?? null;
+}
+
+async function getDistribution(
+  ctx: Ctx,
+  animeId: string
+): Promise<Record<number, number>> {
+  const { results } = await ctx.env.DB.prepare(
+    `SELECT score, COUNT(*) as c FROM ratings WHERE anime_id = ? GROUP BY score`
+  )
+    .bind(animeId)
+    .all<{ score: number; c: number }>();
+
+  const dist: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+  for (const r of results ?? []) dist[r.score] = r.c;
+  return dist;
+}
+
+async function listAll(ctx: Ctx): Promise<Response> {
+  const { results } = await ctx.env.DB.prepare(
+    'SELECT anime_id, average, votes FROM rating_summary WHERE votes > 0 ORDER BY anime_id'
+  ).all<RatingRow>();
+
+  const data: Record<string, { average: number; votes: number }> = {};
+  for (const row of results ?? []) {
+    data[row.anime_id] = { average: row.average, votes: row.votes };
+  }
+
+  return json({ data, total: Object.keys(data).length }, ctx.env, 200, {
+    'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=300',
+  });
+}
+
+async function getOne(ctx: Ctx): Promise<Response> {
+  const animeId = ctx.params.id!;
+  const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
+
+  const row = await ctx.env.DB.prepare(
+    'SELECT anime_id, average, votes FROM rating_summary WHERE anime_id = ?'
+  )
+    .bind(animeId)
+    .first<RatingRow>();
+
+  let userScore: number | null = null;
+  if (session) {
+    userScore = await getUserRating(ctx, animeId, session.sub);
+  }
+
+  const distribution = await getDistribution(ctx, animeId);
+
+  return json(
+    {
+      data: {
+        animeId,
+        average: row?.average ?? 0,
+        votes: row?.votes ?? 0,
+        userScore,
+        canRate: session !== null,
+        distribution,
+      },
+    },
+    ctx.env
+  );
+}
+
+async function recomputeSummary(ctx: Ctx, animeId: string): Promise<void> {
+  await ctx.env.DB.prepare(
+    `INSERT INTO rating_summary (anime_id, average, votes, updated_at)
+     SELECT ?, COALESCE(AVG(score) * 2, 0), COUNT(*), CURRENT_TIMESTAMP
+     FROM ratings WHERE anime_id = ?
+     ON CONFLICT (anime_id)
+     DO UPDATE SET
+       average = excluded.average,
+       votes = excluded.votes,
+       updated_at = CURRENT_TIMESTAMP`
+  )
+    .bind(animeId, animeId)
+    .run();
+}
+
+async function postOne(ctx: Ctx): Promise<Response> {
+  const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
+  if (!session) {
+    return error('UNAUTHORIZED', 'Login dulu untuk memberi rating', ctx.env, 401);
+  }
+
+  const animeId = ctx.params.id!;
+
+  let body: { score?: number };
+  try {
+    body = (await ctx.request.json()) as { score?: number };
+  } catch {
+    return error('INVALID_JSON', 'Body bukan JSON valid', ctx.env, 400);
+  }
+
+  const score = Number(body.score);
+  if (!Number.isInteger(score) || score < 1 || score > 5) {
+    return error('INVALID_SCORE', 'Score harus integer 1-5', ctx.env, 400);
+  }
+
+  await ctx.env.DB.prepare(
+    `INSERT INTO ratings (anime_id, user_id, score)
+     VALUES (?, ?, ?)
+     ON CONFLICT (anime_id, user_id)
+     DO UPDATE SET score = excluded.score, updated_at = CURRENT_TIMESTAMP`
+  )
+    .bind(animeId, session.sub, score)
+    .run();
+
+  await recomputeSummary(ctx, animeId);
+
+  const summary = await ctx.env.DB.prepare(
+    'SELECT average, votes FROM rating_summary WHERE anime_id = ?'
+  )
+    .bind(animeId)
+    .first<{ average: number; votes: number }>();
+
+  const distribution = await getDistribution(ctx, animeId);
+
+  return json(
+    {
+      ok: true,
+      data: {
+        animeId,
+        userScore: score,
+        average: summary?.average ?? 0,
+        votes: summary?.votes ?? 0,
+        distribution,
+      },
+    },
+    ctx.env
+  );
+}
+
+async function deleteOne(ctx: Ctx): Promise<Response> {
+  const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
+  if (!session) return error('UNAUTHORIZED', 'Login dulu', ctx.env, 401);
+
+  const animeId = ctx.params.id!;
+
+  const result = await ctx.env.DB.prepare(
+    'DELETE FROM ratings WHERE anime_id = ? AND user_id = ?'
+  )
+    .bind(animeId, session.sub)
+    .run();
+
+  if ((result.meta?.changes ?? 0) === 0) {
+    return error('NOT_FOUND', 'Rating tidak ditemukan', ctx.env, 404);
+  }
+
+  await recomputeSummary(ctx, animeId);
+
+  const summary = await ctx.env.DB.prepare(
+    'SELECT average, votes FROM rating_summary WHERE anime_id = ?'
+  )
+    .bind(animeId)
+    .first<{ average: number; votes: number }>();
+
+  const distribution = await getDistribution(ctx, animeId);
+
+  return json(
+    {
+      ok: true,
+      data: {
+        animeId,
+        userScore: null,
+        average: summary?.average ?? 0,
+        votes: summary?.votes ?? 0,
+        distribution,
+      },
+    },
+    ctx.env
+  );
+}
+
+export function mountRatings(router: Router): void {
+  router.get('/api/v1/ratings', listAll);
+  router.get('/api/v1/ratings/:id', getOne);
+  router.post('/api/v1/ratings/:id', postOne);
+  router.delete('/api/v1/ratings/:id', deleteOne);
+}
+
+===== FILE: src/routes/reactions.ts =====
+import type { Ctx, Router } from '../lib/router';
+import { json, error } from '../lib/response';
+import { getSession } from '../lib/session';
+import { checkRateLimit, hashKey } from '../lib/ratelimit';
+
+const ALLOWED_EMOJI = ['👍', '❤️', '🔥', '😂', '😮'] as const;
+
+interface ReactionRow {
+  emoji: string;
+  c: number;
+}
+
+interface UserReactionRow {
+  emoji: string;
+}
+
+async function getCounts(
+  ctx: Ctx,
+  animeId: string
+): Promise<Record<string, number>> {
+  const { results } = await ctx.env.DB.prepare(
+    `SELECT emoji, COUNT(*) as c FROM anime_reactions WHERE anime_id = ? GROUP BY emoji`
+  )
+    .bind(animeId)
+    .all<ReactionRow>();
+
+  const counts: Record<string, number> = {};
+  for (const e of ALLOWED_EMOJI) counts[e] = 0;
+  for (const r of results ?? []) {
+    if (r.emoji in counts) counts[r.emoji] = r.c;
+  }
+  return counts;
+}
+
+async function getUserReactions(
+  ctx: Ctx,
+  animeId: string,
+  userId: string
+): Promise<string[]> {
+  const { results } = await ctx.env.DB.prepare(
+    `SELECT emoji FROM anime_reactions WHERE anime_id = ? AND user_id = ?`
+  )
+    .bind(animeId, userId)
+    .all<UserReactionRow>();
+
+  return (results ?? []).map((r) => r.emoji);
+}
+
+async function getOne(ctx: Ctx): Promise<Response> {
+  const animeId = ctx.params.id!;
+  if (!animeId) {
+    return error('MISSING_ID', 'ID anime wajib diisi', ctx.env, 400);
+  }
+
+  const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
+  const counts = await getCounts(ctx, animeId);
+
+  let userReactions: string[] = [];
+  if (session) {
+    userReactions = await getUserReactions(ctx, animeId, session.sub);
+  }
+
+  return json(
+    {
+      data: {
+        animeId,
+        counts,
+        userReactions,
+        canReact: session !== null,
+        allowed: ALLOWED_EMOJI,
+      },
+    },
+    ctx.env,
+    200,
+    { 'Cache-Control': 'no-store' }
+  );
+}
+
+async function toggleReaction(ctx: Ctx): Promise<Response> {
+  const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
+  if (!session) {
+    return error('UNAUTHORIZED', 'Login dulu untuk bereaksi', ctx.env, 401);
+  }
+
+  const animeId = ctx.params.id!;
+  if (!animeId) {
+    return error('MISSING_ID', 'ID anime wajib diisi', ctx.env, 400);
+  }
+
+  let body: { emoji?: string };
+  try {
+    body = (await ctx.request.json()) as { emoji?: string };
+  } catch {
+    return error('INVALID_JSON', 'Body bukan JSON valid', ctx.env, 400);
+  }
+
+  const emoji = typeof body.emoji === 'string' ? body.emoji : '';
+  if (!ALLOWED_EMOJI.includes(emoji as (typeof ALLOWED_EMOJI)[number])) {
+    return error('INVALID_EMOJI', 'Emoji tidak didukung', ctx.env, 400);
+  }
+
+  const key = await hashKey(`reaction:${session.sub}`);
+  const limit = await checkRateLimit(ctx.env.DB, `${key}:m`, 30, 60);
+  if (!limit.ok) {
+    return error('RATE_LIMITED', 'Terlalu cepat', ctx.env, 429);
+  }
+
+  const existing = await ctx.env.DB.prepare(
+    `SELECT 1 FROM anime_reactions
+      WHERE anime_id = ? AND user_id = ? AND emoji = ?`
+  )
+    .bind(animeId, session.sub, emoji)
+    .first<{ 1: number }>();
+
+  const now = Math.floor(Date.now() / 1000);
+
+  if (existing) {
+    await ctx.env.DB.prepare(
+      `DELETE FROM anime_reactions
+        WHERE anime_id = ? AND user_id = ? AND emoji = ?`
+    )
+      .bind(animeId, session.sub, emoji)
+      .run();
+  } else {
+    await ctx.env.DB.prepare(
+      `INSERT INTO anime_reactions (anime_id, user_id, emoji, created_at)
+       VALUES (?, ?, ?, ?)`
+    )
+      .bind(animeId, session.sub, emoji, now)
+      .run();
+  }
+
+  const counts = await getCounts(ctx, animeId);
+  const userReactions = await getUserReactions(ctx, animeId, session.sub);
+
+  return json(
+    {
+      ok: true,
+      data: {
+        animeId,
+        counts,
+        userReactions,
+        canReact: true,
+        allowed: ALLOWED_EMOJI,
+      },
+    },
+    ctx.env
+  );
+}
+
+export function mountReactions(router: Router): void {
+  router.get('/api/v1/reactions/:id', getOne);
+  router.post('/api/v1/reactions/:id', toggleReaction);
+}
+
+===== FILE: src/routes/telegram.ts =====
+import type { Ctx, Router } from '../lib/router';
+import { json, error } from '../lib/response';
+import {
+  sendMessage,
+  deleteMessage,
+  answerCallbackQuery,
+  buildCommentMessage,
+  escapeHtml,
+} from '../lib/telegram';
+
+export interface PendingComment {
+  id: string;
+  slug: string;
+  body: string;
+  userName: string;
+  userEmail: string;
+}
+
+function sanitizeSecret(input: string): string {
+  return input.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 256);
+}
+
+function siteUrl(slug: string): string {
+  return `https://qimochi.web.id/anime/${encodeURIComponent(slug)}/`;
+}
+
+async function purgeCacheForSlug(slug: string): Promise<void> {
+  try {
+    const url = new URL('https://api.qimochi.web.id/api/v1/comments');
+    url.searchParams.set('slug', slug);
+    await caches.default.delete(url.toString());
+  } catch {
+    // ignore
+  }
+}
+
+export async function notifyTelegram(
+  env: Ctx['env'],
+  comment: PendingComment
+): Promise<void> {
+  const token = env.TELEGRAM_BOT_TOKEN;
+  const chatId = env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) return;
+
+  const text = buildCommentMessage(comment);
+  await sendMessage(token, {
+    chatId,
+    text,
+    inlineKeyboard: [
+      [
+        { text: '✅ Approve', callback_data: `approve:${comment.id}` },
+        { text: '❌ Reject', callback_data: `reject:${comment.id}` },
+      ],
+      [{ text: '🔗 Buka halaman', url: siteUrl(comment.slug) }],
+    ],
+  });
+}
+
+export async function notifyAutoRejected(
+  env: Ctx['env'],
+  input: {
+    slug: string;
+    body: string;
+    userName: string;
+    userEmail: string;
+    reason: string;
+    matched: string | null;
+  }
+): Promise<void> {
+  const token = env.TELEGRAM_BOT_TOKEN;
+  const chatId = env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) return;
+
+  const preview =
+    input.body.length > 200 ? input.body.slice(0, 200) + '…' : input.body;
+
+  const text = [
+    `🛑 <b>Auto-reject</b> — ${escapeHtml(input.userName)}`,
+    input.matched
+      ? `Kata: <code>${escapeHtml(input.matched)}</code>`
+      : `Alasan: ${escapeHtml(input.reason)}`,
+    `Slug: <code>${escapeHtml(input.slug)}</code>`,
+    `Email: <code>${escapeHtml(input.userEmail)}</code>`,
+    ``,
+    escapeHtml(preview),
+  ].join('\n');
+
+  await sendMessage(token, { chatId, text });
+}
+
+/* ---------------- COMMAND HELPERS ---------------- */
+
+const HELP_TEXT = [
+  '<b>🤖 Qimochi Moderator Bot</b>',
+  '',
+  'Daftar perintah:',
+  '',
+  '/pending — 5 komentar pending terbaru',
+  '/stats — statistik komentar',
+  '/find &lt;kata&gt; — cari komentar',
+  '/get &lt;id&gt; — detail komentar',
+  '/approve &lt;id&gt; — setujui komentar',
+  '/reject &lt;id&gt; [alasan] — tolak komentar',
+  '/help — tampilkan menu ini',
+].join('\n');
+
+async function sendHelp(token: string, chatId: string): Promise<void> {
+  await sendMessage(token, { chatId, text: HELP_TEXT });
+}
+
+interface StatsRow {
+  status: string;
+  c: number;
+}
+
+async function sendStats(
+  ctx: Ctx,
+  token: string,
+  chatId: string
+): Promise<void> {
+  const { results } = await ctx.env.DB.prepare(
+    `SELECT status, COUNT(*) as c FROM comments GROUP BY status`
+  ).all<StatsRow>();
+
+  const counts: Record<string, number> = {
+    pending: 0,
+    approved: 0,
+    rejected: 0,
+  };
+  for (const r of results ?? []) counts[r.status] = r.c;
+
+  const total = counts.pending + counts.approved + counts.rejected;
+
+  const text = [
+    '<b>📊 Statistik Komentar</b>',
+    '',
+    `Total: <b>${total}</b>`,
+    `🕐 Pending: <b>${counts.pending}</b>`,
+    `✅ Approved: <b>${counts.approved}</b>`,
+    `❌ Rejected (manual): <b>${counts.rejected}</b>`,
+  ].join('\n');
+
+  await sendMessage(token, { chatId, text });
+}
+
+interface PendingRow {
+  id: string;
+  slug: string;
+  body: string;
+  created_at: number;
+  name: string;
+  email: string;
+}
+
+async function sendPendingList(
+  ctx: Ctx,
+  token: string,
+  chatId: string,
+  limit = 5
+): Promise<void> {
+  const { results } = await ctx.env.DB.prepare(
+    `SELECT c.id, c.slug, c.body, c.created_at, u.name, u.email
+       FROM comments c
+       JOIN users u ON u.id = c.user_id
+      WHERE c.status = 'pending'
+      ORDER BY c.created_at ASC
+      LIMIT ?`
+  )
+    .bind(limit)
+    .all<PendingRow>();
+
+  const rows = results ?? [];
+  if (rows.length === 0) {
+    await sendMessage(token, {
+      chatId,
+      text: '✅ Tidak ada komentar pending.',
+    });
+    return;
+  }
+
+  const totalRow = await ctx.env.DB.prepare(
+    `SELECT COUNT(*) as c FROM comments WHERE status = 'pending'`
+  ).first<{ c: number }>();
+  const totalPending = totalRow?.c ?? rows.length;
+
+  await sendMessage(token, {
+    chatId,
+    text: `<b>🕐 ${totalPending} komentar pending</b> (menampilkan ${rows.length} terlama)`,
+  });
+
+  for (const row of rows) {
+    const preview =
+      row.body.length > 400 ? row.body.slice(0, 400) + '…' : row.body;
+    const text = [
+      `<b>📩 ${escapeHtml(row.name)}</b> — <code>${escapeHtml(row.slug)}</code>`,
+      '',
+      escapeHtml(preview),
+      '',
+      `<i>ID: ${row.id}</i>`,
+    ].join('\n');
+
+    await sendMessage(token, {
+      chatId,
+      text,
+      inlineKeyboard: [
+        [
+          { text: '✅ Approve', callback_data: `approve:${row.id}` },
+          { text: '❌ Reject', callback_data: `reject:${row.id}` },
+        ],
+        [{ text: '🔗 Buka halaman', url: siteUrl(row.slug) }],
+      ],
+    });
+  }
+}
+
+interface SearchRow {
+  id: string;
+  slug: string;
+  body: string;
+  status: string;
+  name: string;
+}
+
+async function sendFindResults(
+  ctx: Ctx,
+  token: string,
+  chatId: string,
+  query: string
+): Promise<void> {
+  if (!query || query.length < 2) {
+    await sendMessage(token, {
+      chatId,
+      text: '❌ Query minimal 2 karakter. Contoh: /find frieren',
+    });
+    return;
+  }
+
+  const like = `%${query}%`;
+  const { results } = await ctx.env.DB.prepare(
+    `SELECT c.id, c.slug, c.body, c.status, u.name
+       FROM comments c
+       JOIN users u ON u.id = c.user_id
+      WHERE c.body LIKE ? OR c.slug LIKE ? OR u.name LIKE ?
+      ORDER BY c.created_at DESC
+      LIMIT 10`
+  )
+    .bind(like, like, like)
+    .all<SearchRow>();
+
+  const rows = results ?? [];
+  if (rows.length === 0) {
+    await sendMessage(token, {
+      chatId,
+      text: `Tidak ada hasil untuk "${escapeHtml(query)}".`,
+    });
+    return;
+  }
+
+  const lines = [`<b>🔎 ${rows.length} hasil untuk "${escapeHtml(query)}"</b>`, ''];
+  for (const r of rows) {
+    const icon =
+      r.status === 'approved' ? '✅' : r.status === 'rejected' ? '❌' : '🕐';
+    const preview =
+      r.body.length > 60 ? r.body.slice(0, 60) + '…' : r.body;
+    lines.push(
+      `${icon} <code>${r.id}</code> — ${escapeHtml(r.name)}`,
+      `    <i>${escapeHtml(r.slug)}</i>`,
+      `    ${escapeHtml(preview)}`,
+      ''
+    );
+  }
+
+  await sendMessage(token, { chatId, text: lines.join('\n') });
+}
+
+interface CommentDetail {
+  id: string;
+  slug: string;
+  body: string;
+  status: string;
+  created_at: number;
+  approved_at: number | null;
+  moderated_by: string | null;
+  name: string;
+  email: string;
+}
+
+async function sendGetById(
+  ctx: Ctx,
+  token: string,
+  chatId: string,
+  id: string
+): Promise<void> {
+  const row = await ctx.env.DB.prepare(
+    `SELECT c.id, c.slug, c.body, c.status, c.created_at, c.approved_at,
+            c.moderated_by, u.name, u.email
+       FROM comments c
+       JOIN users u ON u.id = c.user_id
+      WHERE c.id = ?`
+  )
+    .bind(id)
+    .first<CommentDetail>();
+
+  if (!row) {
+    await sendMessage(token, {
+      chatId,
+      text: `❌ Komentar <code>${escapeHtml(id)}</code> tidak ditemukan.`,
+    });
+    return;
+  }
+
+  const icon =
+    row.status === 'approved' ? '✅' : row.status === 'rejected' ? '❌' : '🕐';
+
+  const text = [
+    `<b>${icon} Komentar ${escapeHtml(row.id)}</b>`,
+    '',
+    `<b>Slug:</b> <code>${escapeHtml(row.slug)}</code>`,
+    `<b>Dari:</b> ${escapeHtml(row.name)} &lt;${escapeHtml(row.email)}&gt;`,
+    `<b>Status:</b> ${row.status}`,
+    row.moderated_by ? `<b>Dimoderasi oleh:</b> ${escapeHtml(row.moderated_by)}` : '',
+    '',
+    `<b>Isi:</b>`,
+    escapeHtml(row.body),
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const keyboard: any[][] = [];
+  if (row.status === 'pending') {
+    keyboard.push([
+      { text: '✅ Approve', callback_data: `approve:${row.id}` },
+      { text: '❌ Reject', callback_data: `reject:${row.id}` },
+    ]);
+  }
+  keyboard.push([{ text: '🔗 Buka halaman', url: siteUrl(row.slug) }]);
+
+  await sendMessage(token, { chatId, text, inlineKeyboard: keyboard });
+}
+
+async function moderateById(
+  ctx: Ctx,
+  token: string,
+  chatId: string,
+  id: string,
+  action: 'approve' | 'reject',
+  moderator: string,
+  reason: string | null
+): Promise<void> {
+  const row = await ctx.env.DB.prepare(
+    `SELECT id, slug, status FROM comments WHERE id = ?`
+  )
+    .bind(id)
+    .first<{ id: string; slug: string; status: string }>();
+
+  if (!row) {
+    await sendMessage(token, {
+      chatId,
+      text: `❌ Komentar <code>${escapeHtml(id)}</code> tidak ditemukan.`,
+    });
+    return;
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const targetStatus = action === 'approve' ? 'approved' : 'rejected';
+
+  if (row.status === targetStatus) {
+    await sendMessage(token, {
+      chatId,
+      text: `ℹ️ Komentar <code>${id}</code> sudah ${targetStatus}.`,
+    });
+    return;
+  }
+
+  if (action === 'approve') {
+    await ctx.env.DB.prepare(
+      `UPDATE comments
+          SET status = 'approved',
+              approved_at = ?,
+              moderated_by = ?,
+              reason = ?
+        WHERE id = ?`
+    )
+      .bind(now, moderator, reason ?? 'telegram', id)
+      .run();
+    ctx.exec.waitUntil(purgeCacheForSlug(row.slug));
+  } else {
+    await ctx.env.DB.prepare(
+      `UPDATE comments
+          SET status = 'rejected',
+              moderated_by = ?,
+              reason = ?
+        WHERE id = ?`
+    )
+      .bind(moderator, reason ?? 'telegram', id)
+      .run();
+  }
+
+  const icon = action === 'approve' ? '✅' : '❌';
+  const label = action === 'approve' ? 'Disetujui' : 'Ditolak';
+  await sendMessage(token, {
+    chatId,
+    text: `${icon} <b>${label}</b> — <code>${id}</code>\nSlug: <code>${escapeHtml(row.slug)}</code>`,
+  });
+}
+
+/* ---------------- WEBHOOK ---------------- */
+
+interface TelegramMessage {
+  message_id: number;
+  chat: { id: number };
+  from?: { id: number; username?: string; first_name?: string };
+  text?: string;
+}
+
+interface TelegramCallbackQuery {
+  id: string;
+  from: { id: number; username?: string; first_name?: string };
+  message?: TelegramMessage;
+  data?: string;
+}
+
+interface TelegramUpdate {
+  update_id: number;
+  message?: TelegramMessage;
+  callback_query?: TelegramCallbackQuery;
+}
+
+function moderatorName(from?: {
+  username?: string;
+  first_name?: string;
+}): string {
+  if (!from) return 'admin';
+  if (from.username) return `@${from.username}`;
+  return from.first_name ?? 'admin';
+}
+
+async function handleMessage(
+  ctx: Ctx,
+  msg: TelegramMessage
+): Promise<void> {
+  const token = ctx.env.TELEGRAM_BOT_TOKEN;
+  const chatId = String(msg.chat.id);
+  const text = (msg.text ?? '').trim();
+  if (!text.startsWith('/')) return;
+
+  const moderator = moderatorName(msg.from);
+
+  const parts = text.split(/\s+/);
+  const cmdRaw = parts[0] ?? '';
+  const cmd = cmdRaw.replace(/@\w+$/, '').toLowerCase();
+  const args = parts.slice(1);
+
+  switch (cmd) {
+    case '/start':
+    case '/help':
+      await sendHelp(token, chatId);
+      return;
+    case '/stats':
+      await sendStats(ctx, token, chatId);
+      return;
+    case '/pending':
+      await sendPendingList(ctx, token, chatId);
+      return;
+    case '/find':
+      await sendFindResults(ctx, token, chatId, args.join(' '));
+      return;
+    case '/get':
+      if (!args[0]) {
+        await sendMessage(token, {
+          chatId,
+          text: '❌ Format: /get &lt;id&gt;',
+        });
+        return;
+      }
+      await sendGetById(ctx, token, chatId, args[0]);
+      return;
+    case '/approve':
+      if (!args[0]) {
+        await sendMessage(token, {
+          chatId,
+          text: '❌ Format: /approve &lt;id&gt;',
+        });
+        return;
+      }
+      await moderateById(
+        ctx,
+        token,
+        chatId,
+        args[0],
+        'approve',
+        moderator,
+        args.slice(1).join(' ') || null
+      );
+      return;
+    case '/reject':
+      if (!args[0]) {
+        await sendMessage(token, {
+          chatId,
+          text: '❌ Format: /reject &lt;id&gt; [alasan]',
+        });
+        return;
+      }
+      await moderateById(
+        ctx,
+        token,
+        chatId,
+        args[0],
+        'reject',
+        moderator,
+        args.slice(1).join(' ') || null
+      );
+      return;
+    default:
+      await sendMessage(token, {
+        chatId,
+        text: `❓ Perintah tidak dikenal: <code>${escapeHtml(cmd)}</code>\n\nKetik /help untuk daftar perintah.`,
+      });
+  }
+}
+
+async function handleCallback(
+  ctx: Ctx,
+  cq: TelegramCallbackQuery
+): Promise<void> {
+  const token = ctx.env.TELEGRAM_BOT_TOKEN;
+
+  if (!cq.data || !cq.message) {
+    await answerCallbackQuery(token, cq.id);
+    return;
+  }
+
+  const allowedChatId = ctx.env.TELEGRAM_CHAT_ID;
+  if (String(cq.message.chat.id) !== String(allowedChatId)) {
+    await answerCallbackQuery(token, cq.id, 'Anda tidak berwenang');
+    return;
+  }
+
+  const [action, target] = cq.data.split(':');
+  const moderator = moderatorName(cq.from);
+
+  if (action !== 'approve' && action !== 'reject') {
+    await answerCallbackQuery(token, cq.id, 'Aksi tidak dikenal');
+    return;
+  }
+
+  if (!target) {
+    await answerCallbackQuery(token, cq.id, 'ID kosong');
+    return;
+  }
+
+  const row = await ctx.env.DB.prepare(
+    `SELECT id, slug, status FROM comments WHERE id = ?`
+  )
+    .bind(target)
+    .first<{ id: string; slug: string; status: string }>();
+
+  if (!row) {
+    await answerCallbackQuery(token, cq.id, 'Komentar tidak ditemukan');
+    return;
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+
+  if (action === 'approve') {
+    if (row.status !== 'approved') {
+      await ctx.env.DB.prepare(
+        `UPDATE comments
+            SET status = 'approved',
+                approved_at = ?,
+                moderated_by = ?,
+                reason = ?
+          WHERE id = ?`
+      )
+        .bind(now, moderator, 'telegram', target)
+        .run();
+      ctx.exec.waitUntil(purgeCacheForSlug(row.slug));
+    }
+    await answerCallbackQuery(token, cq.id, 'Disetujui ✅');
+  } else {
+    if (row.status !== 'rejected') {
+      await ctx.env.DB.prepare(
+        `UPDATE comments
+            SET status = 'rejected',
+                moderated_by = ?,
+                reason = ?
+          WHERE id = ?`
+      )
+        .bind(moderator, 'telegram', target)
+        .run();
+    }
+    await answerCallbackQuery(token, cq.id, 'Ditolak ❌');
+  }
+
+  try {
+    await deleteMessage(
+      token,
+      String(cq.message.chat.id),
+      cq.message.message_id
+    );
+  } catch (err) {
+    console.error('[telegram] delete message failed', err);
+  }
+}
+
+async function handleWebhook(ctx: Ctx): Promise<Response> {
+  const secretHeader = ctx.request.headers.get(
+    'X-Telegram-Bot-Api-Secret-Token'
+  );
+  const expected = sanitizeSecret(ctx.env.TELEGRAM_WEBHOOK_SECRET ?? '');
+  if (!expected || secretHeader !== expected) {
+    return error('UNAUTHORIZED', 'Secret tidak valid', ctx.env, 401);
+  }
+
+  let update: TelegramUpdate;
+  try {
+    update = (await ctx.request.json()) as TelegramUpdate;
+  } catch {
+    return json({ ok: true }, ctx.env);
+  }
+
+  const allowedChatId = String(ctx.env.TELEGRAM_CHAT_ID);
+
+  if (update.message && String(update.message.chat.id) === allowedChatId) {
+    ctx.exec.waitUntil(
+      handleMessage(ctx, update.message).catch((err) =>
+        console.error('[telegram] handleMessage failed', err)
+      )
+    );
+    return json({ ok: true }, ctx.env);
+  }
+
+  if (update.callback_query) {
+    ctx.exec.waitUntil(
+      handleCallback(ctx, update.callback_query).catch((err) =>
+        console.error('[telegram] handleCallback failed', err)
+      )
+    );
+    return json({ ok: true }, ctx.env);
+  }
+
+  return json({ ok: true }, ctx.env);
+}
+
+async function setupWebhook(ctx: Ctx): Promise<Response> {
+  const token = ctx.env.TELEGRAM_BOT_TOKEN;
+  const rawSecret = ctx.env.TELEGRAM_WEBHOOK_SECRET ?? '';
+  const secret = sanitizeSecret(rawSecret);
+
+  if (!token || !secret) {
+    return error(
+      'SERVER_MISCONFIGURED',
+      'TELEGRAM_BOT_TOKEN atau TELEGRAM_WEBHOOK_SECRET belum diset',
+      ctx.env,
+      500
+    );
+  }
+
+  const webhookUrl =
+    ctx.url.searchParams.get('url') ??
+    'https://api.qimochi.web.id/api/v1/telegram/webhook';
+
+  const body = {
+    url: webhookUrl,
+    secret_token: secret,
+    allowed_updates: ['message', 'callback_query'],
+    drop_pending_updates: false,
+  };
+
+  const res = await fetch(`https://api.telegram.org/bot${token}/setWebhook`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  const data = (await res.json()) as {
+    ok: boolean;
+    description?: string;
+    result?: unknown;
+  };
+
+  return json(
+    {
+      ok: data.ok,
+      description: data.description ?? null,
+      webhookUrl,
+      allowedUpdates: body.allowed_updates,
+      result: data.result ?? null,
+    },
+    ctx.env
+  );
+}
+
+export function mountTelegram(router: Router): void {
+  router.post('/api/v1/telegram/webhook', handleWebhook);
+  router.get('/api/v1/telegram/setup', setupWebhook);
+}
+
+===== FILE: src/routes/votes.ts =====
+import type { Ctx, Router } from '../lib/router';
+import { json, error } from '../lib/response';
+import { getSession } from '../lib/session';
+import { checkRateLimit, hashKey } from '../lib/ratelimit';
+
+const ALLOWED_TARGETS = ['episode'] as const;
+type Target = (typeof ALLOWED_TARGETS)[number];
+
+interface CountRow {
+  value: number;
+  c: number;
+}
+
+const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+function parseSlug(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const slug = value.trim().toLowerCase();
+  if (!slug || !SLUG_RE.test(slug)) return null;
+  return slug;
+}
+
+function parseEpisode(value: unknown): number | null {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1 || n > 9999) return null;
+  return n;
+}
+
+function parseValue(value: unknown): 1 | 0 | -1 | null {
+  const n = Number(value);
+  if (n === 1 || n === 0 || n === -1) return n as 1 | 0 | -1;
+  return null;
+}
+
+async function getCounts(
+  ctx: Ctx,
+  slug: string,
+  episode: number
+): Promise<{ likes: number; dislikes: number }> {
+  const { results } = await ctx.env.DB.prepare(
+    `SELECT value, COUNT(*) as c
+       FROM episode_votes
+      WHERE slug = ? AND episode = ?
+      GROUP BY value`
+  )
+    .bind(slug, episode)
+    .all<CountRow>();
+
+  let likes = 0;
+  let dislikes = 0;
+  for (const r of results ?? []) {
+    if (r.value === 1) likes = r.c;
+    else if (r.value === -1) dislikes = r.c;
+  }
+  return { likes, dislikes };
+}
+
+async function getUserVote(
+  ctx: Ctx,
+  slug: string,
+  episode: number,
+  userId: string | null
+): Promise<1 | 0 | -1> {
+  if (!userId) return 0;
+
+  const row = await ctx.env.DB.prepare(
+    `SELECT value FROM episode_votes
+      WHERE user_id = ? AND slug = ? AND episode = ?`
+  )
+    .bind(userId, slug, episode)
+    .first<{ value: number }>();
+
+  if (!row) return 0;
+  if (row.value === 1 || row.value === -1) return row.value;
+  return 0;
+}
+
+async function getVotes(ctx: Ctx): Promise<Response> {
+  const target = ctx.url.searchParams.get('target') ?? 'episode';
+  if (!ALLOWED_TARGETS.includes(target as Target)) {
+    return error('INVALID_TARGET', 'Target tidak didukung', ctx.env, 400);
+  }
+
+  const slug = parseSlug(ctx.url.searchParams.get('slug'));
+  if (!slug) {
+    return error('INVALID_SLUG', 'Slug tidak valid', ctx.env, 400);
+  }
+
+  const episode = parseEpisode(ctx.url.searchParams.get('ep'));
+  if (episode === null) {
+    return error('INVALID_EPISODE', 'Nomor episode tidak valid', ctx.env, 400);
+  }
+
+  const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
+
+  const [counts, userVote] = await Promise.all([
+    getCounts(ctx, slug, episode),
+    getUserVote(ctx, slug, episode, session?.sub ?? null),
+  ]);
+
+  return json(
+    {
+      data: {
+        slug,
+        episode,
+        likes: counts.likes,
+        dislikes: counts.dislikes,
+        userVote,
+        canVote: session !== null,
+      },
+    },
+    ctx.env,
+    200,
+    { 'Cache-Control': 'no-store' }
+  );
+}
+
+async function postVote(ctx: Ctx): Promise<Response> {
+  const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
+  if (!session) {
+    return error('UNAUTHORIZED', 'Login dulu untuk vote', ctx.env, 401);
+  }
+
+  let body: {
+    target?: string;
+    slug?: string;
+    ep?: number | string;
+    value?: number | string;
+  };
+  try {
+    body = (await ctx.request.json()) as typeof body;
+  } catch {
+    return error('INVALID_JSON', 'Body bukan JSON valid', ctx.env, 400);
+  }
+
+  const target = body.target ?? 'episode';
+  if (!ALLOWED_TARGETS.includes(target as Target)) {
+    return error('INVALID_TARGET', 'Target tidak didukung', ctx.env, 400);
+  }
+
+  const slug = parseSlug(body.slug);
+  if (!slug) {
+    return error('INVALID_SLUG', 'Slug tidak valid', ctx.env, 400);
+  }
+
+  const episode = parseEpisode(body.ep);
+  if (episode === null) {
+    return error('INVALID_EPISODE', 'Nomor episode tidak valid', ctx.env, 400);
+  }
+
+  const value = parseValue(body.value);
+  if (value === null) {
+    return error('INVALID_VALUE', 'Value harus 1, -1, atau 0', ctx.env, 400);
+  }
+
+  const key = await hashKey(`vote:${session.sub}`);
+  const limit = await checkRateLimit(ctx.env.DB, `${key}:m`, 60, 60);
+  if (!limit.ok) {
+    return json(
+      {
+        error: {
+          code: 'RATE_LIMITED',
+          message: 'Terlalu cepat, tunggu sebentar',
+          status: 429,
+        },
+      },
+      ctx.env,
+      429,
+      { 'Retry-After': String(limit.retryAfter) }
+    );
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+
+  if (value === 0) {
+    await ctx.env.DB.prepare(
+      `DELETE FROM episode_votes
+        WHERE user_id = ? AND slug = ? AND episode = ?`
+    )
+      .bind(session.sub, slug, episode)
+      .run();
+  } else {
+    await ctx.env.DB.prepare(
+      `INSERT INTO episode_votes
+         (user_id, slug, episode, value, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (user_id, slug, episode) DO UPDATE SET
+         value = excluded.value,
+         updated_at = excluded.updated_at`
+    )
+      .bind(session.sub, slug, episode, value, now, now)
+      .run();
+  }
+
+  const [counts, userVote] = await Promise.all([
+    getCounts(ctx, slug, episode),
+    getUserVote(ctx, slug, episode, session.sub),
+  ]);
+
+  return json(
+    {
+      ok: true,
+      data: {
+        slug,
+        episode,
+        likes: counts.likes,
+        dislikes: counts.dislikes,
+        userVote,
+        canVote: true,
+      },
+    },
+    ctx.env
+  );
+}
+
+export function mountVotes(router: Router): void {
+  router.get('/api/v1/votes', getVotes);
+  router.post('/api/v1/votes', postVote);
+}
+
+===== FILE: tsconfig.json =====
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022"],
+    "types": ["@cloudflare/workers-types"],
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts"]
+}
+===== FILE: wrangler.toml =====
+name = "qimochi-api"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+routes = [
+  { pattern = "api.qimochi.web.id/*", zone_name = "qimochi.web.id" }
+]
+
+[vars]
+ALLOWED_ORIGIN = "https://qimochi.web.id"
+GOOGLE_CLIENT_ID = "98346168648-ferhj5ams83nirq87qtjoatl71g8qg5s.apps.googleusercontent.com"
+ADMIN_EMAILS = "hello@qimochi.web.id"
+AUTO_MODERATE = "true"
+BAD_WORDS = "anjing,anjir,bangsat,bajingan,kontol,memek,ngentot,ngentod,kampret,peler,pantek,asu,tai,setan,goblok,tolol,bodoh,idiot,bego,dungu,brengsek,sialan,bedebah"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "qimochi-db"
+database_id = "9d6d7f39-3af8-4167-9db7-b9e0a64fdef9"
+
+[observability]
+enabled = true
+
+## File yang dilewati
