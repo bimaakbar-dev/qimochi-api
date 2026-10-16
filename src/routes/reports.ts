@@ -1,7 +1,7 @@
 import type { Ctx, Router } from '../lib/router';
 import { json, error } from '../lib/response';
 import { getSession } from '../lib/session';
-import { checkRateLimit, getClientIp, hashKey } from '../lib/ratelimit';
+import { checkRateLimit, hashKey } from '../lib/ratelimit';
 import { sendMessage, escapeHtml } from '../lib/telegram';
 
 const ALLOWED_REASONS = [
@@ -30,6 +30,9 @@ const RATE_LIMIT_PER_HOUR = 10;
 
 async function createReport(ctx: Ctx): Promise<Response> {
   const session = await getSession(ctx.request, ctx.env.SESSION_SECRET);
+  if (!session) {
+    return error('UNAUTHORIZED', 'Login dulu untuk melapor', ctx.env, 401);
+  }
 
   let body: {
     slug?: string;
@@ -65,11 +68,8 @@ async function createReport(ctx: Ctx): Promise<Response> {
   const quality = String(body.quality ?? '').trim().slice(0, 50);
   const note = String(body.note ?? '').trim().slice(0, MAX_NOTE_LEN);
 
-  // Rate limit — per user kalau login, per IP kalau tidak
-  const userKey = session
-    ? `report:user:${session.sub}`
-    : `report:ip:${getClientIp(ctx.request)}`;
-  const key = await hashKey(userKey);
+  // Rate limit — per user
+  const key = await hashKey(`report:user:${session.sub}`);
   const limit = await checkRateLimit(
     ctx.env.DB,
     `${key}:h`,
@@ -85,13 +85,13 @@ async function createReport(ctx: Ctx): Promise<Response> {
     );
   }
 
-  // Kirim ke Telegram
+  // Kirim notifikasi ke Telegram
   const token = ctx.env.TELEGRAM_BOT_TOKEN;
   const chatId = ctx.env.TELEGRAM_CHAT_ID;
 
   if (token && chatId) {
-    const userName = session?.name ?? 'Anonymous';
-    const userEmail = session?.email ?? '-';
+    const userName = session.name;
+    const userEmail = session.email;
 
     const lines: string[] = [
       `<b>🚨 Laporan embed bermasalah</b>`,
