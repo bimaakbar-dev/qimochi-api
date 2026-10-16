@@ -10,6 +10,7 @@ import { mountReactions } from './routes/reactions';
 import { mountBookmarks } from './routes/bookmarks';
 import { mountVotes } from './routes/votes';
 import { mountProbe } from './routes/probe';
+import { mountReports } from './routes/reports';
 
 const router = createRouter();
 mountRatings(router);
@@ -21,6 +22,7 @@ mountReactions(router);
 mountBookmarks(router);
 mountVotes(router);
 mountProbe(router);
+mountReports(router);
 
 export default {
   async fetch(
